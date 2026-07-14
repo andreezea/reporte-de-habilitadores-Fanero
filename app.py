@@ -10,15 +10,16 @@ Estructura del archivo:
     2. Funciones de datos (carga / generación / cálculo / publicación)
     3. Funciones de presentación (KPIs, formato semáforo, tablas dinámicas)
     4. Panel de administrador (acceso restringido)
-    5. Plantilla Excel descargable
+    5. Plantillas Excel descargables
     6. Edición de avances por coordinador (acceso restringido)
     7. Interfaz principal (main)
 
 Accesos ocultos (nadie los ve sin conocer la URL exacta):
     ?admin=1   → panel de administrador: publica el archivo Excel completo
-                 (con día de corte, mes y año).
+                 (con día de corte, mes y año). Ej: tu-app.streamlit.app/?admin=1
     ?editar=1  → pestaña "Editar Avances": cada coordinador actualiza el
                  avance de sus propios departamentos, sin tocar el resto.
+                 Ej: tu-app.streamlit.app/?editar=1
     Ambos se pueden combinar, por ejemplo ?admin=1&editar=1.
 
 Lógica de proyección (Cuota y Avance son unidades, no montos en dinero):
@@ -202,7 +203,9 @@ def _leer_excel_publicado(path: str, mtime: float) -> pd.DataFrame:
     """Lee el Excel publicado. `mtime` forma parte de la clave de cache: si
     cambia el archivo (nueva carga del admin o edición de avances), el cache
     se invalida automáticamente para todos los usuarios."""
-    return pd.read_excel(path)
+    df = pd.read_excel(path)
+    df["DNI"] = df["DNI"].astype(str).str.strip()
+    return df
 
 
 def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
@@ -212,6 +215,10 @@ def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
     metadatos que declaró (mes / año / día de corte de las ventas). Si aún no
     se publicó nada, se usa el dataset de ejemplo con un día de corte
     razonable por defecto (ayer, respecto de la fecha del servidor).
+
+    El DNI siempre se normaliza a texto: al guardar/leer Excel, pandas suele
+    inferir números en columnas que parecen enteras, y eso rompería el cruce
+    DNI + Producto al editar avances si no se normaliza en un solo lugar.
     """
     ahora = datetime.now()
 
@@ -228,7 +235,9 @@ def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
         return df, dia_corte, mes, anio
 
     dia_corte = max(ahora.day - 1, 1)
-    return generar_datos_ejemplo(), dia_corte, ahora.month, ahora.year
+    df_ejemplo = generar_datos_ejemplo().copy()
+    df_ejemplo["DNI"] = df_ejemplo["DNI"].astype(str).str.strip()
+    return df_ejemplo, dia_corte, ahora.month, ahora.year
 
 
 def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int) -> None:
@@ -236,6 +245,8 @@ def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int) -> Non
     oficial del dashboard, visible para todos los usuarios en su próxima
     recarga."""
     os.makedirs(DATA_DIR, exist_ok=True)
+    df = df.copy()
+    df["DNI"] = df["DNI"].astype(str).str.strip()
     df.to_excel(DATA_FILE, index=False)
     with open(DATA_META, "w", encoding="utf-8") as f:
         json.dump({"dia_corte": dia_corte, "mes": mes, "anio": anio}, f)
@@ -483,13 +494,13 @@ def panel_admin() -> None:
 
 
 # =============================================================================
-# 5. PLANTILLA EXCEL DESCARGABLE
+# 5. PLANTILLAS EXCEL DESCARGABLES
 # =============================================================================
 
 def generar_plantilla_excel() -> bytes:
-    """Genera en memoria un archivo Excel de plantilla con los encabezados
-    requeridos, dos filas de ejemplo y listas desplegables (validación de
-    datos) para Departamento, Habilitador y Producto."""
+    """Genera en memoria la plantilla completa (para el admin) con los
+    encabezados requeridos, dos filas de ejemplo y listas desplegables
+    (validación de datos) para Departamento, Habilitador y Producto."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Datos"
@@ -526,6 +537,15 @@ def generar_plantilla_excel() -> bytes:
     return buffer.getvalue()
 
 
+def dataframe_a_excel_bytes(df: pd.DataFrame, hoja: str = "Avances") -> bytes:
+    """Convierte un DataFrame a bytes de un archivo .xlsx (para botones de
+    descarga que arman una plantilla a partir de datos ya existentes)."""
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=hoja)
+    return buffer.getvalue()
+
+
 # =============================================================================
 # 6. EDICIÓN DE AVANCES POR COORDINADOR (ACCESO RESTRINGIDO)
 # =============================================================================
@@ -534,7 +554,10 @@ def generar_plantilla_excel() -> bytes:
 # elige su nombre en una lista desplegable y solo puede editar el Avance de
 # los departamentos que tiene asignados (ver diccionario COORDINADORES). La
 # selección de nombre no lleva contraseña: es un control de confianza para
-# uso interno, no una autenticación real.
+# uso interno, no una autenticación real. Pueden editar en línea (tabla
+# editable) o descargando su plantilla, editándola en Excel y subiéndola de
+# vuelta; en ambos casos solo se aplican cambios a sus DNI/Producto
+# permitidos, sin importar qué traiga el archivo subido.
 
 def registrar_ultima_edicion(nombre: str) -> None:
     """Guarda quién fue la última persona en actualizar avances y cuándo."""
@@ -561,6 +584,15 @@ def actualizar_avances(cambios: pd.DataFrame, coordinador: str) -> None:
     coordinador- y vuelve a publicar, preservando el día de corte, mes y año
     vigentes. También registra quién hizo el cambio y cuándo."""
     df_actual, dia_corte, mes, anio = obtener_datos_publicados()
+
+    # DNI puede llegar como texto (tabla editable o Excel subido) o como
+    # número (al releer el Excel publicado, pandas suele inferirlo como
+    # entero). Se normaliza a texto en ambos lados para que el cruce
+    # DNI + Producto siempre encuentre las filas correctas.
+    df_actual = df_actual.copy()
+    df_actual["DNI"] = df_actual["DNI"].astype(str).str.strip()
+    cambios = cambios.copy()
+    cambios["DNI"] = cambios["DNI"].astype(str).str.strip()
 
     df_actual = df_actual.set_index(["DNI", "Producto"])
     cambios_idx = cambios.set_index(["DNI", "Producto"])["Avance"]
@@ -594,25 +626,80 @@ def panel_editar_avances(df_raw: pd.DataFrame) -> None:
         .sort_values(["Departamento", "Nombre", "Producto"])
         .reset_index(drop=True)
     )
+    df_editable["DNI"] = df_editable["DNI"].astype(str).str.strip()
 
     if df_editable.empty:
         st.info("No hay registros para los departamentos asignados a este coordinador.")
         return
 
+    claves_permitidas = set(zip(df_editable["DNI"], df_editable["Producto"]))
+
+    st.markdown("#### Opción 1 · Editar directamente en la tabla")
     columnas_bloqueadas = [c for c in df_editable.columns if c != "Avance"]
     editado = st.data_editor(
         df_editable,
         disabled=columnas_bloqueadas,
         hide_index=True,
         use_container_width=True,
-        height=500,
+        height=400,
         key=f"editor_avances_{coordinador_sel}",
     )
 
-    if st.button("Guardar cambios", key="guardar_avances"):
+    if st.button("Guardar cambios de la tabla", key="guardar_avances_tabla"):
         actualizar_avances(editado[["DNI", "Producto", "Avance"]], coordinador_sel)
         st.success(f"Avances actualizados por {coordinador_sel}.")
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### Opción 2 · Descargar plantilla, editar en Excel y volver a subir")
+
+    st.download_button(
+        "📥 Descargar mis datos actuales (Excel)",
+        data=dataframe_a_excel_bytes(df_editable),
+        file_name=f"avances_{coordinador_sel.replace(' ', '_').lower()}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="descargar_plantilla_avances",
+    )
+    st.caption("Solo modifica la columna Avance. No cambies DNI, Departamento ni Producto.")
+
+    archivo_avances = st.file_uploader(
+        "Subir Excel con avances actualizados", type=["xlsx"], key=f"subir_avances_{coordinador_sel}"
+    )
+
+    if archivo_avances is not None and st.button("Guardar cambios del archivo", key="guardar_avances_archivo"):
+        try:
+            df_subido = pd.read_excel(archivo_avances)
+        except Exception as exc:  # noqa: BLE001 - se informa al usuario cualquier error de lectura
+            st.error(f"No se pudo leer el archivo: {exc}")
+            df_subido = None
+
+        if df_subido is not None:
+            faltantes = {"DNI", "Producto", "Avance"} - set(df_subido.columns)
+            if faltantes:
+                st.error("Al archivo le faltan columnas: " + ", ".join(sorted(faltantes)))
+            else:
+                df_subido = df_subido.copy()
+                df_subido["DNI"] = df_subido["DNI"].astype(str).str.strip()
+                mascara_permitida = df_subido.apply(
+                    lambda fila: (fila["DNI"], fila["Producto"]) in claves_permitidas, axis=1
+                )
+                df_filtrado_subida = df_subido[mascara_permitida]
+                ignoradas = len(df_subido) - len(df_filtrado_subida)
+
+                if df_filtrado_subida.empty:
+                    st.error(
+                        f"Ninguna fila del archivo corresponde a los departamentos "
+                        f"permitidos para {coordinador_sel} ({', '.join(departamentos_permitidos)})."
+                    )
+                else:
+                    actualizar_avances(df_filtrado_subida[["DNI", "Producto", "Avance"]], coordinador_sel)
+                    if ignoradas > 0:
+                        st.warning(
+                            f"Se ignoraron {ignoradas} fila(s) que no pertenecen a los "
+                            "departamentos permitidos para este coordinador."
+                        )
+                    st.success(f"Avances actualizados por {coordinador_sel} desde archivo.")
+                    st.rerun()
 
 
 # =============================================================================
