@@ -8,17 +8,18 @@ producto y ubicación geográfica.
 Estructura del archivo:
     1. Configuración y constantes
     2. Funciones de datos (carga / generación / cálculo / publicación)
-    3. Funciones de presentación (KPIs, formato semáforo)
+    3. Funciones de presentación (KPIs, formato semáforo, tablas dinámicas)
     4. Panel de administrador (acceso restringido)
-    5. Interfaz principal (main)
+    5. Plantilla Excel descargable
+    6. Edición de avances por coordinador (acceso restringido)
+    7. Interfaz principal (main)
 
-Acceso de administrador:
-    El panel de carga de datos está oculto para el público general. Solo es
-    visible al abrir la app con el parámetro ?admin=1 en la URL, por ejemplo:
-        https://tu-app.streamlit.app/?admin=1
-    Las credenciales se leen de st.secrets (ver sección "Configuración de
-    credenciales" más abajo). Sin ese parámetro, la app se ve exactamente
-    igual para gerencia, sin ningún rastro del control de acceso.
+Accesos ocultos (nadie los ve sin conocer la URL exacta):
+    ?admin=1   → panel de administrador: publica el archivo Excel completo
+                 (con día de corte, mes y año).
+    ?editar=1  → pestaña "Editar Avances": cada coordinador actualiza el
+                 avance de sus propios departamentos, sin tocar el resto.
+    Ambos se pueden combinar, por ejemplo ?admin=1&editar=1.
 
 Lógica de proyección (Cuota y Avance son unidades, no montos en dinero):
     Al publicar los datos, el administrador indica el "día de corte": el
@@ -35,10 +36,13 @@ import calendar
 import json
 import os
 from datetime import datetime
+from io import BytesIO
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.worksheet.datavalidation import DataValidation
 
 # =============================================================================
 # 1. CONFIGURACIÓN Y CONSTANTES
@@ -53,12 +57,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Rutas donde se guarda el último archivo publicado por el administrador y
-# sus metadatos (mes/año/día de corte). Persisten mientras la app siga
-# corriendo, y las ve todo el que abra el enlace del dashboard.
+# Rutas donde se guarda el último archivo publicado por el administrador, sus
+# metadatos (mes/año/día de corte) y el registro de la última edición de
+# avances. Persisten mientras la app siga corriendo, y las ve todo el que
+# abra el enlace del dashboard.
 DATA_DIR = "data"
 DATA_FILE = os.path.join(DATA_DIR, "ultima_carga.xlsx")
 DATA_META = os.path.join(DATA_DIR, "meta.json")
+LOG_EDICION = os.path.join(DATA_DIR, "ultima_edicion.json")
 
 # Habilitadores disponibles para el filtro principal (selectbox)
 HABILITADORES = [
@@ -115,6 +121,20 @@ NOMBRES_EJEMPLO = [
 COLUMNAS_REQUERIDAS = {
     "DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto",
     "Cuota", "Avance",
+}
+
+# Coordinadores que pueden editar avances (pestaña oculta ?editar=1) y los
+# departamentos que cada uno tiene permitido tocar. Selección por nombre
+# únicamente (sin PIN): pensado para uso interno de confianza, no como
+# control de acceso fuerte.
+COORDINADORES = {
+    "Cinthya Maravi": ["Pasco"],
+    "Diana Alvarado": ["Amazonas", "Cajamarca"],
+    "Gian Ramirez": ["San Martín"],
+    "Hernán Pizarro": ["Loreto"],
+    "Jeferson Torres": ["Junín", "Huancavelica"],
+    "Keiner Valdivia": ["Huánuco"],
+    "Sheyla Piro": ["Ucayali"],
 }
 
 
@@ -179,9 +199,9 @@ def cargar_datos_excel(archivo) -> pd.DataFrame | None:
 
 @st.cache_data
 def _leer_excel_publicado(path: str, mtime: float) -> pd.DataFrame:
-    """Lee el Excel publicado. `mtime` forma parte de la clave de cache: si el
-    administrador sube un archivo nuevo, el mtime cambia y el cache se invalida
-    automáticamente para todos los usuarios."""
+    """Lee el Excel publicado. `mtime` forma parte de la clave de cache: si
+    cambia el archivo (nueva carga del admin o edición de avances), el cache
+    se invalida automáticamente para todos los usuarios."""
     return pd.read_excel(path)
 
 
@@ -416,6 +436,18 @@ def panel_admin() -> None:
     # --- Sesión de administrador activa ---
     st.success("Sesión de administrador activa.")
 
+    st.download_button(
+        "📥 Descargar plantilla Excel",
+        data=generar_plantilla_excel(),
+        file_name="plantilla_reporte_habilitadores_fanero.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.caption(
+        "Elimina las filas de ejemplo antes de subir tu archivo real. Cada "
+        "gestor debe tener una fila por producto (Prepago, Porta Flex, "
+        "Postpago, OSS)."
+    )
+
     with st.expander("Columnas requeridas del Excel"):
         st.write(sorted(COLUMNAS_REQUERIDAS))
 
@@ -451,18 +483,151 @@ def panel_admin() -> None:
 
 
 # =============================================================================
-# 5. INTERFAZ PRINCIPAL
+# 5. PLANTILLA EXCEL DESCARGABLE
+# =============================================================================
+
+def generar_plantilla_excel() -> bytes:
+    """Genera en memoria un archivo Excel de plantilla con los encabezados
+    requeridos, dos filas de ejemplo y listas desplegables (validación de
+    datos) para Departamento, Habilitador y Producto."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Datos"
+
+    headers = ["DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto", "Cuota", "Avance"]
+    ws.append(headers)
+
+    ejemplos = [
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "PDV Plus", "Prepago", 300, 150],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "PDV Plus", "Postpago", 100, 40],
+    ]
+    for fila in ejemplos:
+        ws.append(fila)
+
+    ultima_fila = 1000
+    dv_departamento = DataValidation(type="list", formula1='"' + ",".join(DEPARTAMENTOS) + '"', allow_blank=True)
+    dv_habilitador = DataValidation(type="list", formula1='"' + ",".join(HABILITADORES) + '"', allow_blank=True)
+    dv_producto = DataValidation(type="list", formula1='"' + ",".join(PRODUCTOS) + '"', allow_blank=True)
+
+    ws.add_data_validation(dv_departamento)
+    ws.add_data_validation(dv_habilitador)
+    ws.add_data_validation(dv_producto)
+
+    dv_departamento.add(f"C2:C{ultima_fila}")
+    dv_habilitador.add(f"E2:E{ultima_fila}")
+    dv_producto.add(f"F2:F{ultima_fila}")
+
+    anchos = {"A": 12, "B": 22, "C": 16, "D": 18, "E": 16, "F": 12, "G": 10, "H": 10}
+    for col, ancho in anchos.items():
+        ws.column_dimensions[col].width = ancho
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+# =============================================================================
+# 6. EDICIÓN DE AVANCES POR COORDINADOR (ACCESO RESTRINGIDO)
+# =============================================================================
+#
+# Pestaña oculta: solo aparece con ?editar=1 en la URL. Cada coordinador
+# elige su nombre en una lista desplegable y solo puede editar el Avance de
+# los departamentos que tiene asignados (ver diccionario COORDINADORES). La
+# selección de nombre no lleva contraseña: es un control de confianza para
+# uso interno, no una autenticación real.
+
+def registrar_ultima_edicion(nombre: str) -> None:
+    """Guarda quién fue la última persona en actualizar avances y cuándo."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(LOG_EDICION, "w", encoding="utf-8") as f:
+        json.dump({"nombre": nombre, "timestamp": datetime.now().isoformat()}, f)
+
+
+def obtener_ultima_edicion() -> dict | None:
+    """Devuelve {'nombre':..., 'timestamp':...} de la última edición, o None
+    si todavía no se registró ninguna."""
+    if os.path.exists(LOG_EDICION):
+        try:
+            with open(LOG_EDICION, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001 - archivo corrupto o incompleto
+            return None
+    return None
+
+
+def actualizar_avances(cambios: pd.DataFrame, coordinador: str) -> None:
+    """Aplica los nuevos valores de Avance (columnas DNI, Producto, Avance)
+    sobre el dataset publicado completo -no solo el subconjunto visible del
+    coordinador- y vuelve a publicar, preservando el día de corte, mes y año
+    vigentes. También registra quién hizo el cambio y cuándo."""
+    df_actual, dia_corte, mes, anio = obtener_datos_publicados()
+
+    df_actual = df_actual.set_index(["DNI", "Producto"])
+    cambios_idx = cambios.set_index(["DNI", "Producto"])["Avance"]
+    indices_validos = cambios_idx.index.intersection(df_actual.index)
+    df_actual.loc[indices_validos, "Avance"] = cambios_idx.loc[indices_validos]
+    df_actual = df_actual.reset_index()
+
+    publicar_datos(df_actual, dia_corte, mes, anio)
+    registrar_ultima_edicion(coordinador)
+
+
+def panel_editar_avances(df_raw: pd.DataFrame) -> None:
+    """Renderiza la pestaña de edición de avances. `df_raw` es el dataset
+    publicado completo (sin filtrar por Habilitador), para que cada
+    coordinador vea y edite todos sus registros sin importar el filtro de
+    Habilitador que esté activo arriba en el dashboard."""
+    ultima = obtener_ultima_edicion()
+    if ultima:
+        ts = datetime.fromisoformat(ultima["timestamp"])
+        st.caption(f"Última conexión: {ultima['nombre']} · {ts:%d/%m/%Y %H:%M}")
+    else:
+        st.caption("Todavía no se registró ninguna edición de avances.")
+
+    coordinador_sel = st.selectbox("Coordinador", sorted(COORDINADORES.keys()), key="coordinador_editor")
+    departamentos_permitidos = COORDINADORES[coordinador_sel]
+    st.caption(f"{coordinador_sel} solo puede editar: {', '.join(departamentos_permitidos)}")
+
+    df_editable = (
+        df_raw[df_raw["Departamento"].isin(departamentos_permitidos)]
+        [["DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto", "Cuota", "Avance"]]
+        .sort_values(["Departamento", "Nombre", "Producto"])
+        .reset_index(drop=True)
+    )
+
+    if df_editable.empty:
+        st.info("No hay registros para los departamentos asignados a este coordinador.")
+        return
+
+    columnas_bloqueadas = [c for c in df_editable.columns if c != "Avance"]
+    editado = st.data_editor(
+        df_editable,
+        disabled=columnas_bloqueadas,
+        hide_index=True,
+        use_container_width=True,
+        height=500,
+        key=f"editor_avances_{coordinador_sel}",
+    )
+
+    if st.button("Guardar cambios", key="guardar_avances"):
+        actualizar_avances(editado[["DNI", "Producto", "Avance"]], coordinador_sel)
+        st.success(f"Avances actualizados por {coordinador_sel}.")
+        st.rerun()
+
+
+# =============================================================================
+# 7. INTERFAZ PRINCIPAL
 # =============================================================================
 
 def main():
     st.title("📊 Reporte Habilitadores Fanero")
 
-    # El panel administrador solo se renderiza con ?admin=1 en la URL.
-    # Sin ese parámetro no queda ningún rastro visible (ni siquiera la
-    # flechita de la sidebar aparece, porque nunca se le agrega contenido).
+    # Los paneles ocultos solo se renderizan con sus parámetros en la URL.
+    # Sin ellos no queda ningún rastro visible para gerencia.
     if st.query_params.get("admin") == "1":
         with st.sidebar:
             panel_admin()
+    mostrar_editor = st.query_params.get("editar") == "1"
 
     # Fuente de datos: lo último publicado por el administrador (con su día
     # de corte), o el dataset de ejemplo si aún no se publicó nada.
@@ -542,7 +707,11 @@ def main():
     st.markdown("---")
 
     # --- Pestañas ---
-    tab_detalle, tab_ritmo = st.tabs(["Detalle Habilitador", "Ritmo Diario"])
+    tab_names = ["Detalle Habilitador", "Ritmo Diario"]
+    if mostrar_editor:
+        tab_names.append("Editar Avances")
+    tabs = st.tabs(tab_names)
+    tab_detalle, tab_ritmo = tabs[0], tabs[1]
 
     with tab_detalle:
         st.subheader(f"Detalle habilitador. {habilitador_sel}")
@@ -611,6 +780,11 @@ def main():
                 "Cuota Diaria = (Cuota - Avance) / días restantes · Corte = avance a la fecha de corte · "
                 "🟥 <80% · 🟨 80%–99% · 🟩 ≥100% (Cump %)"
             )
+
+    if mostrar_editor:
+        with tabs[2]:
+            st.subheader("Editar Avances")
+            panel_editar_avances(df_raw)
 
 
 if __name__ == "__main__":
