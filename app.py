@@ -20,11 +20,11 @@ Acceso de administrador:
     credenciales" más abajo). Sin ese parámetro, la app se ve exactamente
     igual para gerencia, sin ningún rastro del control de acceso.
 
-Lógica de proyección:
+Lógica de proyección (Cuota y Avance son unidades, no montos en dinero):
     Al publicar los datos, el administrador indica el "día de corte": el
     último día del mes con ventas efectivamente cargadas. Con eso:
-        Proyección $ = Avance * (días del mes / día de corte)
-        Proy %       = Proyección $ / Cuota
+        Proy Unidades = Avance * (días del mes / día de corte)
+        Proy %        = Proy Unidades / Cuota
         Días restantes = días del mes - día de corte
         Cuota diaria necesaria = (Cuota - Avance) / Días restantes
 
@@ -70,7 +70,8 @@ HABILITADORES = [
     "Desarrolladores",
 ]
 
-# Departamentos permitidos en el análisis
+# Departamentos permitidos en el análisis (el orden aquí define el orden de
+# las tablas que agrupan por departamento)
 DEPARTAMENTOS = [
     "Amazonas",
     "Cajamarca",
@@ -222,11 +223,12 @@ def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int) -> Non
 
 
 def calcular_metricas(df: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
-    """Calcula las columnas derivadas del análisis:
+    """Calcula las columnas derivadas del análisis (Cuota/Avance son
+    unidades, no montos en dinero):
 
     - Cumplimiento % = Avance / Cuota
-    - Proyección $   = Avance * (días del mes / día de corte)
-    - Proy %         = Proyección $ / Cuota
+    - Proy Unidades  = Avance * (días del mes / día de corte)
+    - Proy %         = Proy Unidades / Cuota
     """
     df = df.copy()
     dia_corte = max(dia_corte, 1)  # evita división entre cero
@@ -234,8 +236,8 @@ def calcular_metricas(df: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.
     df["Cumplimiento %"] = np.where(df["Cuota"] > 0, df["Avance"] / df["Cuota"], 0.0)
 
     factor_proyeccion = dias_en_mes / dia_corte
-    df["Proyección $"] = df["Avance"] * factor_proyeccion
-    df["Proy %"] = np.where(df["Cuota"] > 0, df["Proyección $"] / df["Cuota"], 0.0)
+    df["Proy Unidades"] = df["Avance"] * factor_proyeccion
+    df["Proy %"] = np.where(df["Cuota"] > 0, df["Proy Unidades"] / df["Cuota"], 0.0)
 
     return df
 
@@ -276,19 +278,19 @@ def aplicar_estilo_tabla(tabla: pd.DataFrame):
         "Cuota": "{:,.0f}",
         "Avance": "{:,.0f}",
         "Cumplimiento %": "{:.1%}",
-        "Proyección $": "{:,.0f}",
+        "Proy Unidades": "{:,.0f}",
     })
     return _aplicar_semaforo(styler, ["Cumplimiento %"])
 
 
 def aplicar_estilo_resumen_producto(tabla: pd.DataFrame):
     """Aplica formato numérico y semáforo (Cumplimiento % y Proy %) al
-    resumen por producto."""
+    resumen por departamento y producto."""
     styler = tabla.style.format({
         "Cuota": "{:,.0f}",
         "Avance": "{:,.0f}",
         "Cumplimiento %": "{:.1%}",
-        "Proyección $": "{:,.0f}",
+        "Proy Unidades": "{:,.0f}",
         "Proy %": "{:.1%}",
     })
     return _aplicar_semaforo(styler, ["Cumplimiento %", "Proy %"])
@@ -307,26 +309,33 @@ def aplicar_estilo_ritmo(tabla: pd.DataFrame):
     return _aplicar_semaforo(styler, ["Cumplimiento %"])
 
 
-def resumen_por_producto(df_filtrado: pd.DataFrame, productos_sel: list[str],
-                          dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
-    """Agrega Cuota y Avance por producto (sin sumar entre productos
-    distintos) y recalcula Cumplimiento %, Proyección $ y Proy % a partir de
-    los totales agregados."""
+def resumen_por_producto(df_filtrado: pd.DataFrame, departamentos_sel: list[str],
+                          productos_sel: list[str], dias_en_mes: int,
+                          dia_corte: int) -> pd.DataFrame:
+    """Agrega Cuota y Avance por Departamento + Producto (nunca se suman
+    productos distintos entre sí) y recalcula Cumplimiento %, Proy Unidades y
+    Proy % a partir de los totales agregados.
+
+    Si hay varios departamentos seleccionados, cada uno aparece como su
+    propia fila (una por cada combinación Departamento/Producto)."""
     resumen = (
-        df_filtrado.groupby("Producto", as_index=False)
+        df_filtrado.groupby(["Departamento", "Producto"], as_index=False)
         .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
     )
 
-    orden = [p for p in PRODUCTOS if p in productos_sel]
-    resumen = resumen.set_index("Producto").reindex(orden).reset_index()
+    orden_dep = [d for d in DEPARTAMENTOS if d in departamentos_sel]
+    orden_prod = [p for p in PRODUCTOS if p in productos_sel]
+    combinaciones = pd.MultiIndex.from_product([orden_dep, orden_prod], names=["Departamento", "Producto"])
+
+    resumen = resumen.set_index(["Departamento", "Producto"]).reindex(combinaciones).reset_index()
     resumen[["Cuota", "Avance"]] = resumen[["Cuota", "Avance"]].fillna(0)
 
     resumen["Cumplimiento %"] = np.where(resumen["Cuota"] > 0, resumen["Avance"] / resumen["Cuota"], 0.0)
     factor_proyeccion = dias_en_mes / max(dia_corte, 1)
-    resumen["Proyección $"] = resumen["Avance"] * factor_proyeccion
-    resumen["Proy %"] = np.where(resumen["Cuota"] > 0, resumen["Proyección $"] / resumen["Cuota"], 0.0)
+    resumen["Proy Unidades"] = resumen["Avance"] * factor_proyeccion
+    resumen["Proy %"] = np.where(resumen["Cuota"] > 0, resumen["Proy Unidades"] / resumen["Cuota"], 0.0)
 
-    return resumen[["Producto", "Cuota", "Avance", "Cumplimiento %", "Proyección $", "Proy %"]]
+    return resumen[["Departamento", "Producto", "Cuota", "Avance", "Cumplimiento %", "Proy Unidades", "Proy %"]]
 
 
 def ritmo_diario_por_producto(df_filtrado: pd.DataFrame, productos_sel: list[str],
@@ -504,12 +513,14 @@ def main():
 
     st.markdown("---")
 
-    # --- Resumen por producto (no se suman entre sí, son productos distintos) ---
+    # --- Resumen por producto (y departamento, si hay varios seleccionados) ---
     st.subheader("Resumen por Producto")
     if df_filtrado.empty:
         st.info("No hay datos para los filtros seleccionados.")
     else:
-        tabla_resumen = resumen_por_producto(df_filtrado, productos_sel, dias_en_mes, dia_corte)
+        tabla_resumen = resumen_por_producto(
+            df_filtrado, departamentos_sel, productos_sel, dias_en_mes, dia_corte
+        )
         st.dataframe(
             aplicar_estilo_resumen_producto(tabla_resumen),
             use_container_width=True,
@@ -527,7 +538,7 @@ def main():
 
         columnas_mostrar = [
             "DNI", "Nombre", "Departamento", "Distrito", "Producto",
-            "Cuota", "Avance", "Cumplimiento %", "Proyección $",
+            "Cuota", "Avance", "Cumplimiento %", "Proy Unidades",
         ]
 
         if df_filtrado.empty:
