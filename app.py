@@ -7,14 +7,24 @@ producto y ubicación geográfica.
 
 Estructura del archivo:
     1. Configuración y constantes
-    2. Funciones de datos (carga / generación / cálculo)
+    2. Funciones de datos (carga / generación / cálculo / publicación)
     3. Funciones de presentación (KPIs, formato semáforo)
-    4. Interfaz principal (main)
+    4. Panel de administrador (acceso restringido)
+    5. Interfaz principal (main)
+
+Acceso de administrador:
+    El panel de carga de datos está oculto para el público general. Solo es
+    visible al abrir la app con el parámetro ?admin=1 en la URL, por ejemplo:
+        https://tu-app.streamlit.app/?admin=1
+    Las credenciales se leen de st.secrets (ver sección "Configuración de
+    credenciales" más abajo). Sin ese parámetro, la app se ve exactamente
+    igual para gerencia, sin ningún rastro del control de acceso.
 
 Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 """
 
 import calendar
+import os
 from datetime import datetime
 
 import numpy as np
@@ -29,7 +39,15 @@ st.set_page_config(
     page_title="Dashboard Gerencial de Ventas",
     page_icon="📊",
     layout="wide",
+    # Sidebar oculta por defecto: ahí vive el panel de administrador, y así
+    # nadie que reciba el enlace del dashboard nota que existe.
+    initial_sidebar_state="collapsed",
 )
+
+# Ruta donde se guarda el último archivo publicado por el administrador.
+# Persiste entre sesiones/usuarios mientras la app siga corriendo.
+DATA_DIR = "data"
+DATA_FILE = os.path.join(DATA_DIR, "ultima_carga.xlsx")
 
 # Habilitadores disponibles para el filtro principal (selectbox)
 HABILITADORES = [
@@ -126,7 +144,7 @@ def generar_datos_ejemplo(n_gestores: int = 150, seed: int = 42) -> pd.DataFrame
 
 
 def cargar_datos_excel(archivo) -> pd.DataFrame | None:
-    """Lee y valida un archivo Excel cargado por el usuario.
+    """Lee y valida un archivo Excel cargado por el administrador.
 
     Retorna None (y muestra un error en la UI) si faltan columnas requeridas.
     """
@@ -145,6 +163,30 @@ def cargar_datos_excel(archivo) -> pd.DataFrame | None:
         return None
 
     return df
+
+
+@st.cache_data
+def _leer_excel_publicado(path: str, mtime: float) -> pd.DataFrame:
+    """Lee el Excel publicado. `mtime` forma parte de la clave de cache: si el
+    administrador sube un archivo nuevo, el mtime cambia y el cache se invalida
+    automáticamente para todos los usuarios."""
+    return pd.read_excel(path)
+
+
+def obtener_datos_publicados() -> pd.DataFrame:
+    """Devuelve los datos que ve gerencia: el último archivo publicado por el
+    administrador, o el dataset de ejemplo si todavía no se publicó ninguno."""
+    if os.path.exists(DATA_FILE):
+        return _leer_excel_publicado(DATA_FILE, os.path.getmtime(DATA_FILE))
+    return generar_datos_ejemplo()
+
+
+def publicar_datos(df: pd.DataFrame) -> None:
+    """Guarda el archivo validado como la fuente de datos oficial del
+    dashboard, visible para todos los usuarios en su próxima recarga."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df.to_excel(DATA_FILE, index=False)
+    _leer_excel_publicado.clear()  # invalida el cache de lectura
 
 
 def calcular_metricas(df: pd.DataFrame, fecha_referencia: datetime | None = None) -> pd.DataFrame:
@@ -206,7 +248,70 @@ def aplicar_estilo_tabla(tabla: pd.DataFrame):
 
 
 # =============================================================================
-# 4. INTERFAZ PRINCIPAL
+# 4. PANEL DE ADMINISTRADOR (ACCESO RESTRINGIDO)
+# =============================================================================
+#
+# Configuración de credenciales (recomendado, no se sube al repositorio):
+# En Streamlit Cloud → Settings → Secrets, agregar:
+#
+#   [admin]
+#   usuario = "admin"
+#   password = "coloca_aqui_una_clave_segura"
+#
+# Si no se configuran secrets (por ejemplo en pruebas locales), se usa un
+# usuario/clave por defecto que se debe cambiar antes de publicar el enlace.
+
+def _credenciales_admin() -> tuple[str, str]:
+    try:
+        return st.secrets["admin"]["usuario"], st.secrets["admin"]["password"]
+    except Exception:  # noqa: BLE001 - no hay secrets configurados aún
+        return "admin", "cambiar123"
+
+
+def panel_admin() -> None:
+    """Renderiza el control de acceso y la carga de datos. Solo se llama
+    cuando la URL incluye ?admin=1, por lo que gerencia nunca lo ve."""
+    st.header("🔒 Panel administrador")
+
+    if not st.session_state.get("es_admin", False):
+        with st.form("form_login_admin"):
+            usuario = st.text_input("Usuario")
+            clave = st.text_input("Contraseña", type="password")
+            enviar = st.form_submit_button("Ingresar")
+
+        if enviar:
+            usuario_ok, clave_ok = _credenciales_admin()
+            if usuario == usuario_ok and clave == clave_ok:
+                st.session_state["es_admin"] = True
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+        return
+
+    # --- Sesión de administrador activa ---
+    st.success("Sesión de administrador activa.")
+
+    with st.expander("Columnas requeridas del Excel"):
+        st.write(sorted(COLUMNAS_REQUERIDAS))
+
+    archivo = st.file_uploader("Cargar archivo Excel (.xlsx)", type=["xlsx"])
+    if archivo is not None:
+        df_validado = cargar_datos_excel(archivo)
+        if df_validado is not None:
+            publicar_datos(df_validado)
+            st.success("Datos publicados. Todos los usuarios verán la actualización al recargar.")
+
+    if os.path.exists(DATA_FILE):
+        ultima_actualizacion = datetime.fromtimestamp(os.path.getmtime(DATA_FILE))
+        st.caption(f"Última publicación: {ultima_actualizacion:%d/%m/%Y %H:%M}")
+
+    if st.button("Cerrar sesión"):
+        st.session_state["es_admin"] = False
+        st.rerun()
+
+
+# =============================================================================
+# 5. INTERFAZ PRINCIPAL
 # =============================================================================
 
 def main():
@@ -216,24 +321,16 @@ def main():
         f"Actualizado al {datetime.now():%d/%m/%Y}"
     )
 
-    # --- Carga de datos (barra lateral) ---
-    with st.sidebar:
-        st.header("Fuente de datos")
-        archivo = st.file_uploader("Cargar archivo Excel (.xlsx)", type=["xlsx"])
-        with st.expander("Columnas requeridas del Excel"):
-            st.write(sorted(COLUMNAS_REQUERIDAS))
+    # El panel administrador solo se renderiza con ?admin=1 en la URL.
+    # Sin ese parámetro no queda ningún rastro visible (ni siquiera la
+    # flechita de la sidebar aparece, porque nunca se le agrega contenido).
+    if st.query_params.get("admin") == "1":
+        with st.sidebar:
+            panel_admin()
 
-    if archivo is not None:
-        df_cargado = cargar_datos_excel(archivo)
-        if df_cargado is not None:
-            df_raw = df_cargado
-            st.sidebar.success("Archivo cargado correctamente.")
-        else:
-            df_raw = generar_datos_ejemplo()
-            st.sidebar.warning("Se usó el dataset de ejemplo por un error en el archivo.")
-    else:
-        df_raw = generar_datos_ejemplo()
-        st.sidebar.info("No se cargó ningún archivo. Mostrando dataset de ejemplo.")
+    # Fuente de datos: lo último publicado por el administrador,
+    # o el dataset de ejemplo si aún no se publicó nada.
+    df_raw = obtener_datos_publicados()
 
     # Se restringe el análisis únicamente a los departamentos y productos válidos
     df_raw = df_raw[df_raw["Departamento"].isin(DEPARTAMENTOS)]
