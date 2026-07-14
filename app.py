@@ -42,13 +42,15 @@ Puntos de Venta (PDV):
     para todas las filas (compatibilidad con archivos anteriores).
 
     En la pestaña "Detalle Habilitador", cuando el habilitador seleccionado
-    es uno de estos dos, cada gestor se muestra como una fila expandible:
-    - Colapsada: nombre, DNI y la sumatoria de todos sus PDV en todos sus
-      productos (Cuota, Avance y Cumplimiento % totales).
-    - Expandida: una sola tabla con una fila "Total" (suma de sus PDV) y
-      luego una fila por cada PDV, con identidad DNI/PDV/Departamento/
-      Provincia/Distrito, y los productos como columnas agrupadas (Cuota,
-      Avance, Cumplimiento % debajo de cada producto).
+    es uno de estos dos, cada gestor se muestra con el mismo cuadro (tabla)
+    siempre visible, y un expander aparte para el desglose por PDV:
+    - Siempre visible: nombre, DNI y una tabla con la fila "Total" (suma de
+      sus PDV), con identidad DNI/PDV/Departamento/Provincia/Distrito y los
+      productos como columnas agrupadas (Cuota, Avance, Cumplimiento % debajo
+      de cada producto) - el mismo formato de cuadro tanto colapsado como
+      expandido.
+    - Al desplegar "Ver detalle por PDV": la misma tabla pero con una fila
+      por cada PDV en vez de la fila Total.
 
 Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 """
@@ -469,8 +471,10 @@ def aplicar_estilo_resumen_producto(tabla: pd.DataFrame, orden_prod: list):
 
 
 def totales_por_gestor(df_filtrado: pd.DataFrame) -> pd.DataFrame:
-    """Suma Cuota y Avance de TODOS los productos y PDV de cada gestor (para
-    el resumen que se ve en la fila colapsada, antes de desplegar)."""
+    """Suma Cuota y Avance de TODOS los productos y PDV de cada gestor.
+    Utilitario auxiliar (por ejemplo, para exportaciones); la vista principal
+    de "Detalle Habilitador" usa la fila "Total" de tabla_detalle_gestor, que
+    mantiene el desglose por producto en el mismo formato de cuadro."""
     totales = df_filtrado.groupby("DNI", as_index=False).agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
     totales["Cump %"] = np.where(totales["Cuota"] > 0, totales["Avance"] / totales["Cuota"], 0.0)
     return totales
@@ -494,6 +498,10 @@ def tabla_detalle_gestor(detalle_g: pd.DataFrame, productos_sel: list) -> pd.Dat
     fila por cada PDV. Identidad: DNI, PDV, Departamento, Provincia, Distrito
     (mismo orden que en el resto de la app). Los productos van como columnas
     agrupadas, con Cuota, Avance y Cumplimiento % debajo de cada uno.
+
+    Esta misma tabla (filtrando solo la fila Total o solo las filas de PDV)
+    es la que se muestra tanto en el cuadro resumen siempre visible como en
+    el detalle desplegable, para mantener exactamente el mismo formato.
 
     Nota: si los PDV de un mismo gestor estuvieran en distritos distintos, la
     fila "Total" se calcula por combinación de Departamento/Provincia/
@@ -1007,14 +1015,13 @@ def main():
         if df_filtrado.empty:
             st.info("No hay registros para los filtros seleccionados.")
         elif habilitador_sel in HABILITADORES_CON_PDV:
-            # --- Vista con Puntos de Venta: una fila expandible por gestor ---
+            # --- Vista con Puntos de Venta: un cuadro resumen por gestor ---
             st.caption(
                 "Este habilitador tiene Puntos de Venta (PDV) por debajo de cada "
-                "gestor. El nombre muestra el total de todos sus productos y PDV; "
-                "haz clic para ver el detalle."
+                "gestor. El cuadro de cada gestor muestra el total de sus PDV por "
+                "producto; despliega 'Ver detalle por PDV' para ver el desglose."
             )
 
-            totales_gestor = totales_por_gestor(df_filtrado)
             detalle_pdv = detalle_pdv_por_gestor(df_filtrado, dias_en_mes, dia_corte)
 
             gestores = (
@@ -1026,19 +1033,27 @@ def main():
             st.caption(f"{len(gestores)} gestor(es) en {habilitador_sel}.")
 
             for _, gestor in gestores.iterrows():
-                fila_total = totales_gestor[totales_gestor["DNI"] == gestor["DNI"]].iloc[0]
-                etiqueta = (
-                    f"👤 {gestor['Nombre']} · DNI {gestor['DNI']} · "
-                    f"Cuota {fila_total['Cuota']:,.0f} · Avance {fila_total['Avance']:,.0f} · "
-                    f"Cump% {fila_total['Cump %']:.1%}"
+                detalle_g = detalle_pdv[detalle_pdv["DNI"] == gestor["DNI"]]
+                tabla_g = tabla_detalle_gestor(detalle_g, productos_sel)
+
+                es_total = tabla_g.index.get_level_values("PDV") == "Total"
+                tabla_total = tabla_g[es_total]
+                tabla_pdv = tabla_g[~es_total]
+
+                # El cuadro resumen (fila Total) siempre queda visible, con el
+                # mismo formato -columnas de producto agrupadas y semáforo- que
+                # el detalle expandido: solo cambia si se ven o no los PDV.
+                st.markdown(f"**👤 {gestor['Nombre']} · DNI {gestor['DNI']}**")
+                st.dataframe(
+                    aplicar_estilo_detalle_pdv(tabla_total, orden_prod_sel),
+                    use_container_width=True,
                 )
-                with st.expander(etiqueta):
-                    detalle_g = detalle_pdv[detalle_pdv["DNI"] == gestor["DNI"]]
-                    tabla_g = tabla_detalle_gestor(detalle_g, productos_sel)
+                with st.expander(f"Ver detalle por PDV ({len(tabla_pdv)} punto(s) de venta)"):
                     st.dataframe(
-                        aplicar_estilo_detalle_pdv(tabla_g, orden_prod_sel),
+                        aplicar_estilo_detalle_pdv(tabla_pdv, orden_prod_sel),
                         use_container_width=True,
                     )
+                st.write("")
 
             columnas_pdv_csv = [
                 "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto", "PDV",
