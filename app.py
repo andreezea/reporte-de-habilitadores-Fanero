@@ -421,7 +421,7 @@ def _credenciales_admin() -> tuple[str, str]:
     try:
         return st.secrets["admin"]["usuario"], st.secrets["admin"]["password"]
     except Exception:  # noqa: BLE001 - no hay secrets configurados aún
-        return "admin", "cambiar123"
+        return "admin", "admin2025"
 
 
 def panel_admin() -> None:
@@ -616,7 +616,7 @@ def panel_editar_avances(df_raw: pd.DataFrame) -> None:
     else:
         st.caption("Todavía no se registró ninguna edición de avances.")
 
-    coordinador_sel = st.selectbox("Coordinador", sorted(COORDINADORES.keys()), key="coordinador_editor")
+    coordinador_sel = st.selectbox("Persona que cargará", sorted(COORDINADORES.keys()), key="coordinador_editor")
     departamentos_permitidos = COORDINADORES[coordinador_sel]
     st.caption(f"{coordinador_sel} solo puede editar: {', '.join(departamentos_permitidos)}")
 
