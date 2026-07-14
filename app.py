@@ -30,15 +30,25 @@ Lógica de proyección (Cuota y Avance son unidades, no montos en dinero):
         Días restantes = días del mes - día de corte
         Cuota diaria necesaria = (Cuota - Avance) / Días restantes
 
+Ubicación geográfica:
+    Departamento → Provincia → Distrito. Provincia es un campo obligatorio
+    del Excel (junto con Departamento y Distrito).
+
 Puntos de Venta (PDV):
     Activaciones y Desarrolladores son habilitadores cuyos gestores manejan
     varios Puntos de Venta (PDV) por debajo, cada uno con su propia Cuota y
     Avance. El resto de habilitadores no usa este nivel (columna PDV vacía).
     La columna "PDV" en el Excel es opcional: si no existe, se asume vacía
-    para todas las filas (compatibilidad con archivos anteriores). En la
-    pestaña "Detalle Habilitador", cuando el habilitador seleccionado es uno
-    de estos dos, cada gestor se muestra como una fila expandible: al hacer
-    clic se despliega el resumen agregado y el detalle por PDV.
+    para todas las filas (compatibilidad con archivos anteriores).
+
+    En la pestaña "Detalle Habilitador", cuando el habilitador seleccionado
+    es uno de estos dos, cada gestor se muestra como una fila expandible:
+    - Colapsada: nombre, DNI y la sumatoria de todos sus PDV en todos sus
+      productos (Cuota, Avance y Cumplimiento % totales).
+    - Expandida: una sola tabla con una fila "Total" (suma de sus PDV) y
+      luego una fila por cada PDV, con identidad DNI/PDV/Departamento/
+      Provincia/Distrito, y los productos como columnas agrupadas (Cuota,
+      Avance, Cumplimiento % debajo de cada producto).
 
 Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 """
@@ -91,35 +101,67 @@ HABILITADORES = [
 # uno con su propia Cuota/Avance.
 HABILITADORES_CON_PDV = ["Activaciones", "Desarrolladores"]
 
+# Geografía de referencia: Departamento → Provincia → Distritos. Define el
+# orden de Departamentos usado en toda la app y alimenta el dataset de
+# ejemplo. (Aproximación representativa, no un padrón oficial completo.)
+GEOGRAFIA = {
+    "Amazonas": {
+        "Chachapoyas": ["Chachapoyas", "Huancas", "Levanto"],
+        "Bagua": ["Bagua", "Aramango", "Copallín"],
+        "Condorcanqui": ["Nieva", "Río Santiago", "El Cenepa"],
+    },
+    "Cajamarca": {
+        "Cajamarca": ["Cajamarca", "Baños del Inca", "Jesús"],
+        "Jaén": ["Jaén", "Bellavista", "Chontalí"],
+        "Cutervo": ["Cutervo", "Callayuc", "Choros"],
+    },
+    "Huancavelica": {
+        "Huancavelica": ["Huancavelica", "Acoria", "Yauli"],
+        "Tayacaja": ["Pampas", "Acraquia", "Colcabamba"],
+        "Acobamba": ["Acobamba", "Andabamba", "Anta"],
+    },
+    "Huánuco": {
+        "Huánuco": ["Huánuco", "Amarilis", "Pillco Marca"],
+        "Leoncio Prado": ["Rupa-Rupa", "Daniel Alomía Robles", "Hermilio Valdizán"],
+        "Ambo": ["Ambo", "Cayna", "Colpas"],
+    },
+    "Junín": {
+        "Huancayo": ["Huancayo", "Chilca", "El Tambo"],
+        "Tarma": ["Tarma", "Acobamba", "Huaricolca"],
+        "Chanchamayo": ["Chanchamayo", "Perené", "Pichanaqui"],
+    },
+    "Loreto": {
+        "Maynas": ["Iquitos", "Belén", "Punchana"],
+        "Alto Amazonas": ["Yurimaguas", "Balsapuerto", "Jeberos"],
+        "Requena": ["Requena", "Maquía", "Tapiche"],
+    },
+    "Pasco": {
+        "Pasco": ["Chaupimarca", "Yanacancha", "Simón Bolívar"],
+        "Oxapampa": ["Oxapampa", "Pozuzo", "Villa Rica"],
+        "Daniel Alcides Carrión": ["Yanahuanca", "Chacayán", "Goyllarisquizga"],
+    },
+    "San Martín": {
+        "Moyobamba": ["Moyobamba", "Calzada", "Habana"],
+        "San Martín": ["Tarapoto", "Morales", "La Banda de Shilcayo"],
+        "Rioja": ["Rioja", "Elías Soplín Vargas", "Nueva Cajamarca"],
+    },
+    "Ucayali": {
+        "Coronel Portillo": ["Callería", "Yarinacocha", "Manantay"],
+        "Padre Abad": ["Padre Abad", "Irazola", "Curimaná"],
+        "Atalaya": ["Raymondi", "Sepahua", "Tahuanía"],
+    },
+}
+
 # Departamentos permitidos en el análisis (el orden aquí define el orden de
 # las tablas que agrupan por departamento)
-DEPARTAMENTOS = [
-    "Amazonas",
-    "Cajamarca",
-    "Huancavelica",
-    "Huánuco",
-    "Junín",
-    "Loreto",
-    "Pasco",
-    "San Martín",
-    "Ucayali",
-]
+DEPARTAMENTOS = list(GEOGRAFIA.keys())
+
+# Todas las provincias (de todos los departamentos), usadas solo como lista
+# de referencia en la plantilla Excel.
+TODAS_LAS_PROVINCIAS = sorted({prov for deps in GEOGRAFIA.values() for prov in deps.keys()})
 
 # Productos analizados (el orden aquí define el orden de las columnas)
 PRODUCTOS = ["Prepago", "Porta Flex", "Postpago", "OSS"]
-
-# Distritos de referencia por departamento (usados para el dataset de ejemplo)
-DISTRITOS_POR_DEPARTAMENTO = {
-    "Amazonas": ["Chachapoyas", "Bagua", "Condorcanqui"],
-    "Cajamarca": ["Cajamarca", "Jaén", "Cutervo"],
-    "Huancavelica": ["Huancavelica", "Tayacaja", "Acobamba"],
-    "Huánuco": ["Huánuco", "Leoncio Prado", "Ambo"],
-    "Junín": ["Huancayo", "Tarma", "Chanchamayo"],
-    "Loreto": ["Maynas", "Alto Amazonas", "Requena"],
-    "Pasco": ["Pasco", "Oxapampa", "Daniel Alcides Carrión"],
-    "San Martín": ["Moyobamba", "Tarapoto", "Rioja"],
-    "Ucayali": ["Coronel Portillo", "Padre Abad", "Atalaya"],
-}
 
 # Nombres de referencia para el dataset sintético
 NOMBRES_EJEMPLO = [
@@ -135,8 +177,8 @@ NOMBRES_EJEMPLO = [
 
 # Columnas obligatorias en el Excel. "PDV" es opcional (ver HABILITADORES_CON_PDV).
 COLUMNAS_REQUERIDAS = {
-    "DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto",
-    "Cuota", "Avance",
+    "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Habilitador",
+    "Producto", "Cuota", "Avance",
 }
 
 # Coordinadores que pueden editar avances (pestaña oculta ?editar=1) y los
@@ -160,12 +202,22 @@ COORDINADORES = {
 
 def _normalizar_pdv(df: pd.DataFrame) -> pd.DataFrame:
     """Garantiza que exista la columna PDV (opcional) y que quede como texto
-    limpio, vacía ("") si no aplica. Se usa en todos los puntos donde entran
-    datos nuevos: generación de ejemplo, carga de Excel y lectura publicada."""
+    limpio, vacía ("") si no aplica."""
     df = df.copy()
     if "PDV" not in df.columns:
         df["PDV"] = ""
     df["PDV"] = df["PDV"].fillna("").astype(str).str.strip()
+    return df
+
+
+def _normalizar_provincia(df: pd.DataFrame) -> pd.DataFrame:
+    """Red de seguridad para archivos publicados antes de que Provincia
+    existiera: si falta, se completa con un valor de relleno en vez de
+    romper la app. Las cargas NUEVAS sí exigen Provincia (COLUMNAS_REQUERIDAS)."""
+    df = df.copy()
+    if "Provincia" not in df.columns:
+        df["Provincia"] = "Sin dato"
+    df["Provincia"] = df["Provincia"].fillna("Sin dato").astype(str).str.strip()
     return df
 
 
@@ -184,7 +236,8 @@ def generar_datos_ejemplo(n_gestores: int = 150, seed: int = 42) -> pd.DataFrame
         dni = str(40000000 + int(rng.integers(0, 9_999_999)))
         nombre = rng.choice(NOMBRES_EJEMPLO)
         departamento = rng.choice(DEPARTAMENTOS)
-        distrito = rng.choice(DISTRITOS_POR_DEPARTAMENTO[departamento])
+        provincia = rng.choice(list(GEOGRAFIA[departamento].keys()))
+        distrito = rng.choice(GEOGRAFIA[departamento][provincia])
         habilitador = rng.choice(HABILITADORES)
         tiene_pdv = habilitador in HABILITADORES_CON_PDV
 
@@ -201,6 +254,7 @@ def generar_datos_ejemplo(n_gestores: int = 150, seed: int = 42) -> pd.DataFrame
                     "DNI": dni,
                     "Nombre": nombre,
                     "Departamento": departamento,
+                    "Provincia": provincia,
                     "Distrito": distrito,
                     "Habilitador": habilitador,
                     "Producto": producto,
@@ -215,9 +269,10 @@ def generar_datos_ejemplo(n_gestores: int = 150, seed: int = 42) -> pd.DataFrame
 def cargar_datos_excel(archivo) -> pd.DataFrame | None:
     """Lee y valida un archivo Excel cargado por el administrador.
 
-    Retorna None (y muestra un error en la UI) si faltan columnas requeridas.
-    La columna PDV es opcional: si no viene, se agrega vacía para todas las
-    filas (compatibilidad con archivos que no usan Puntos de Venta).
+    Retorna None (y muestra un error en la UI) si faltan columnas requeridas
+    (incluye Provincia). La columna PDV es opcional: si no viene, se agrega
+    vacía para todas las filas (compatibilidad con archivos sin Puntos de
+    Venta).
     """
     try:
         df = pd.read_excel(archivo)
@@ -244,6 +299,7 @@ def _leer_excel_publicado(path: str, mtime: float) -> pd.DataFrame:
     df = pd.read_excel(path)
     df["DNI"] = df["DNI"].astype(str).str.strip()
     df = _normalizar_pdv(df)
+    df = _normalizar_provincia(df)
     return df
 
 
@@ -257,7 +313,7 @@ def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
 
     El DNI siempre se normaliza a texto: al guardar/leer Excel, pandas suele
     inferir números en columnas que parecen enteras, y eso rompería el cruce
-    DNI + Producto (+ PDV) al editar avances si no se normaliza en un solo
+    DNI + PDV + Producto al editar avances si no se normaliza en un solo
     lugar.
     """
     ahora = datetime.now()
@@ -278,6 +334,7 @@ def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
     df_ejemplo = generar_datos_ejemplo().copy()
     df_ejemplo["DNI"] = df_ejemplo["DNI"].astype(str).str.strip()
     df_ejemplo = _normalizar_pdv(df_ejemplo)
+    df_ejemplo = _normalizar_provincia(df_ejemplo)
     return df_ejemplo, dia_corte, ahora.month, ahora.year
 
 
@@ -289,6 +346,7 @@ def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int) -> Non
     df = df.copy()
     df["DNI"] = df["DNI"].astype(str).str.strip()
     df = _normalizar_pdv(df)
+    df = _normalizar_provincia(df)
     df.to_excel(DATA_FILE, index=False)
     with open(DATA_META, "w", encoding="utf-8") as f:
         json.dump({"dia_corte": dia_corte, "mes": mes, "anio": anio}, f)
@@ -348,8 +406,7 @@ def _aplicar_semaforo(styler, columnas: list):
 
 def aplicar_estilo_tabla(tabla: pd.DataFrame):
     """Aplica formato numérico y semáforo de cumplimiento a una tabla plana
-    que tenga las columnas Cuota, Avance, Cumplimiento % y Proy Unidades
-    (se usa tanto en el detalle por gestor como en los cuadros de PDV)."""
+    que tenga las columnas Cuota, Avance, Cumplimiento % y/o Proy Unidades."""
     fmt = {}
     for col, patron in (
         ("Cuota", "{:,.0f}"), ("Avance", "{:,.0f}"),
@@ -411,28 +468,76 @@ def aplicar_estilo_resumen_producto(tabla: pd.DataFrame, orden_prod: list):
     return _aplicar_semaforo(styler, subset)
 
 
-def agregados_por_gestor(df_filtrado: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
-    """Para habilitadores con PDV: agrega Cuota y Avance por gestor + producto
-    (sumando todos sus PDV) y recalcula Cumplimiento % y Proy Unidades sobre
-    esos totales. Es el "resumen" que se ve dentro de cada fila expandible."""
-    resumen = (
-        df_filtrado.groupby(["DNI", "Nombre", "Departamento", "Distrito", "Producto"], as_index=False)
-        .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
-    )
-    resumen["Cumplimiento %"] = np.where(resumen["Cuota"] > 0, resumen["Avance"] / resumen["Cuota"], 0.0)
-    factor_proyeccion = dias_en_mes / max(dia_corte, 1)
-    resumen["Proy Unidades"] = resumen["Avance"] * factor_proyeccion
-    return resumen
+def totales_por_gestor(df_filtrado: pd.DataFrame) -> pd.DataFrame:
+    """Suma Cuota y Avance de TODOS los productos y PDV de cada gestor (para
+    el resumen que se ve en la fila colapsada, antes de desplegar)."""
+    totales = df_filtrado.groupby("DNI", as_index=False).agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
+    totales["Cump %"] = np.where(totales["Cuota"] > 0, totales["Avance"] / totales["Cuota"], 0.0)
+    return totales
 
 
 def detalle_pdv_por_gestor(df_filtrado: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
     """Detalle a nivel PDV (una fila por Producto + PDV) con sus propias
-    métricas, sin agregar. Es lo que se ve al desplegar un gestor."""
-    detalle = df_filtrado[["DNI", "Nombre", "Departamento", "Distrito", "Producto", "PDV", "Cuota", "Avance"]].copy()
+    métricas, sin agregar. Es la base para armar la tabla de cada gestor."""
+    detalle = df_filtrado[
+        ["DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto", "PDV", "Cuota", "Avance"]
+    ].copy()
     detalle["Cumplimiento %"] = np.where(detalle["Cuota"] > 0, detalle["Avance"] / detalle["Cuota"], 0.0)
     factor_proyeccion = dias_en_mes / max(dia_corte, 1)
     detalle["Proy Unidades"] = detalle["Avance"] * factor_proyeccion
     return detalle
+
+
+def tabla_detalle_gestor(detalle_g: pd.DataFrame, productos_sel: list) -> pd.DataFrame:
+    """A partir del detalle de PDV de UN gestor (ya filtrado a su DNI), arma
+    una sola tabla: primera fila "Total" (suma de todos sus PDV), luego una
+    fila por cada PDV. Identidad: DNI, PDV, Departamento, Provincia, Distrito
+    (mismo orden que en el resto de la app). Los productos van como columnas
+    agrupadas, con Cuota, Avance y Cumplimiento % debajo de cada uno.
+
+    Nota: si los PDV de un mismo gestor estuvieran en distritos distintos, la
+    fila "Total" se calcula por combinación de Departamento/Provincia/
+    Distrito (no mezcla ubicaciones distintas en una sola suma)."""
+    identidad = ["DNI", "Departamento", "Provincia", "Distrito"]
+
+    total = (
+        detalle_g.groupby(identidad + ["Producto"], as_index=False)
+        .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
+    )
+    total["PDV"] = "Total"
+    total["Cumplimiento %"] = np.where(total["Cuota"] > 0, total["Avance"] / total["Cuota"], 0.0)
+
+    columnas_combinar = ["DNI", "PDV", "Departamento", "Provincia", "Distrito", "Producto", "Cuota", "Avance", "Cumplimiento %"]
+    combinado = pd.concat([total[columnas_combinar], detalle_g[columnas_combinar]], ignore_index=True)
+
+    orden_prod = [p for p in PRODUCTOS if p in productos_sel]
+    metricas = ["Cuota", "Avance", "Cumplimiento %"]
+
+    ancho = combinado.pivot_table(
+        index=["DNI", "PDV", "Departamento", "Provincia", "Distrito"],
+        columns="Producto", values=metricas, aggfunc="first",
+    )
+    ancho = ancho.swaplevel(axis=1)
+    columnas_orden = pd.MultiIndex.from_product([orden_prod, metricas])
+    ancho = ancho.reindex(columns=columnas_orden)
+
+    fila_total = ancho[ancho.index.get_level_values("PDV") == "Total"]
+    filas_pdv = ancho[ancho.index.get_level_values("PDV") != "Total"].sort_index(level="PDV")
+    return pd.concat([fila_total, filas_pdv])
+
+
+def aplicar_estilo_detalle_pdv(tabla: pd.DataFrame, orden_prod: list):
+    """Aplica formato numérico y semáforo (Cumplimiento %) a la tabla
+    combinada Total + PDV de un gestor."""
+    fmt = {}
+    for p in orden_prod:
+        fmt[(p, "Cuota")] = "{:,.0f}"
+        fmt[(p, "Avance")] = "{:,.0f}"
+        fmt[(p, "Cumplimiento %")] = "{:.1%}"
+
+    styler = tabla.style.format(fmt, na_rep="-")
+    subset = [(p, "Cumplimiento %") for p in orden_prod]
+    return _aplicar_semaforo(styler, subset)
 
 
 def ritmo_diario_por_gestor(df_filtrado: pd.DataFrame, productos_sel: list,
@@ -537,7 +642,7 @@ def panel_admin() -> None:
         "gestor debe tener una fila por producto (Prepago, Porta Flex, "
         "Postpago, OSS). Para Activaciones y Desarrolladores, agrega una "
         "fila por cada PDV (columna PDV); para los demás habilitadores deja "
-        "esa columna vacía."
+        "esa columna vacía. Provincia es obligatoria para todos."
     )
 
     with st.expander("Columnas del Excel"):
@@ -581,41 +686,44 @@ def panel_admin() -> None:
 
 def generar_plantilla_excel() -> bytes:
     """Genera en memoria la plantilla completa (para el admin) con los
-    encabezados requeridos, filas de ejemplo (incluyendo un caso con PDV) y
-    listas desplegables (validación de datos) para Departamento, Habilitador
-    y Producto."""
+    encabezados requeridos (incluida Provincia), filas de ejemplo (una con
+    PDV) y listas desplegables (validación de datos) para Departamento,
+    Habilitador, Producto y Provincia."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Datos"
 
-    headers = ["DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto", "PDV", "Cuota", "Avance"]
+    headers = ["DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Habilitador", "Producto", "PDV", "Cuota", "Avance"]
     ws.append(headers)
 
     ejemplos = [
         # Habilitador sin PDV: la columna PDV queda vacía
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "PDV Plus", "Prepago", "", 300, 150],
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "PDV Plus", "Postpago", "", 100, 40],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", 300, 150],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", 100, 40],
         # Habilitador con PDV: mismo gestor y producto, repartido en 2 PDV
-        ["87654321", "Rosa Huamán", "San Martín", "Tarapoto", "Activaciones", "Prepago", "PDV Norte", 180, 150],
-        ["87654321", "Rosa Huamán", "San Martín", "Tarapoto", "Activaciones", "Prepago", "PDV Sur", 120, 95],
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "PDV Norte", 180, 150],
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "PDV Sur", 120, 95],
     ]
     for fila in ejemplos:
         ws.append(fila)
 
     ultima_fila = 1000
     dv_departamento = DataValidation(type="list", formula1='"' + ",".join(DEPARTAMENTOS) + '"', allow_blank=True)
+    dv_provincia = DataValidation(type="list", formula1='"' + ",".join(TODAS_LAS_PROVINCIAS) + '"', allow_blank=True)
     dv_habilitador = DataValidation(type="list", formula1='"' + ",".join(HABILITADORES) + '"', allow_blank=True)
     dv_producto = DataValidation(type="list", formula1='"' + ",".join(PRODUCTOS) + '"', allow_blank=True)
 
     ws.add_data_validation(dv_departamento)
+    ws.add_data_validation(dv_provincia)
     ws.add_data_validation(dv_habilitador)
     ws.add_data_validation(dv_producto)
 
     dv_departamento.add(f"C2:C{ultima_fila}")
-    dv_habilitador.add(f"E2:E{ultima_fila}")
-    dv_producto.add(f"F2:F{ultima_fila}")
+    dv_provincia.add(f"D2:D{ultima_fila}")
+    dv_habilitador.add(f"F2:F{ultima_fila}")
+    dv_producto.add(f"G2:G{ultima_fila}")
 
-    anchos = {"A": 12, "B": 22, "C": 16, "D": 18, "E": 16, "F": 12, "G": 16, "H": 10, "I": 10}
+    anchos = {"A": 12, "B": 22, "C": 16, "D": 18, "E": 18, "F": 16, "G": 12, "H": 16, "I": 10, "J": 10}
     for col, ancho in anchos.items():
         ws.column_dimensions[col].width = ancho
 
@@ -713,7 +821,7 @@ def panel_editar_avances(df_raw: pd.DataFrame) -> None:
 
     df_editable = (
         df_raw[df_raw["Departamento"].isin(departamentos_permitidos)]
-        [["DNI", "Nombre", "Departamento", "Distrito", "Habilitador", "Producto", "PDV", "Cuota", "Avance"]]
+        [["DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Habilitador", "Producto", "PDV", "Cuota", "Avance"]]
         .sort_values(["Departamento", "Nombre", "Producto", "PDV"])
         .reset_index(drop=True)
     )
@@ -752,7 +860,7 @@ def panel_editar_avances(df_raw: pd.DataFrame) -> None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="descargar_plantilla_avances",
     )
-    st.caption("Solo modifica la columna Avance. No cambies DNI, Departamento, PDV ni Producto.")
+    st.caption("Solo modifica la columna Avance. No cambies DNI, Departamento, Provincia, Distrito, PDV ni Producto.")
 
     archivo_avances = st.file_uploader(
         "Subir Excel con avances actualizados", type=["xlsx"], key=f"subir_avances_{coordinador_sel}"
@@ -902,15 +1010,15 @@ def main():
             # --- Vista con Puntos de Venta: una fila expandible por gestor ---
             st.caption(
                 "Este habilitador tiene Puntos de Venta (PDV) por debajo de cada "
-                "gestor. Haz clic en un nombre para ver su resumen y el detalle "
-                "por PDV."
+                "gestor. El nombre muestra el total de todos sus productos y PDV; "
+                "haz clic para ver el detalle."
             )
 
-            resumen_gestor = agregados_por_gestor(df_filtrado, dias_en_mes, dia_corte)
+            totales_gestor = totales_por_gestor(df_filtrado)
             detalle_pdv = detalle_pdv_por_gestor(df_filtrado, dias_en_mes, dia_corte)
 
             gestores = (
-                resumen_gestor[["DNI", "Nombre", "Departamento"]]
+                detalle_pdv[["DNI", "Nombre", "Departamento"]]
                 .drop_duplicates()
                 .sort_values(["Departamento", "Nombre"])
                 .reset_index(drop=True)
@@ -918,28 +1026,22 @@ def main():
             st.caption(f"{len(gestores)} gestor(es) en {habilitador_sel}.")
 
             for _, gestor in gestores.iterrows():
-                etiqueta = f"👤 {gestor['Nombre']} · DNI {gestor['DNI']} · {gestor['Departamento']}"
+                fila_total = totales_gestor[totales_gestor["DNI"] == gestor["DNI"]].iloc[0]
+                etiqueta = (
+                    f"👤 {gestor['Nombre']} · DNI {gestor['DNI']} · "
+                    f"Cuota {fila_total['Cuota']:,.0f} · Avance {fila_total['Avance']:,.0f} · "
+                    f"Cump% {fila_total['Cump %']:.1%}"
+                )
                 with st.expander(etiqueta):
-                    resumen_g = (
-                        resumen_gestor[resumen_gestor["DNI"] == gestor["DNI"]]
-                        [["Producto", "Cuota", "Avance", "Cumplimiento %", "Proy Unidades"]]
-                        .sort_values("Producto")
-                        .reset_index(drop=True)
+                    detalle_g = detalle_pdv[detalle_pdv["DNI"] == gestor["DNI"]]
+                    tabla_g = tabla_detalle_gestor(detalle_g, productos_sel)
+                    st.dataframe(
+                        aplicar_estilo_detalle_pdv(tabla_g, orden_prod_sel),
+                        use_container_width=True,
                     )
-                    st.markdown("**Resumen (suma de sus PDV)**")
-                    st.dataframe(aplicar_estilo_tabla(resumen_g), use_container_width=True, hide_index=True)
-
-                    detalle_g = (
-                        detalle_pdv[detalle_pdv["DNI"] == gestor["DNI"]]
-                        [["Producto", "PDV", "Cuota", "Avance", "Cumplimiento %", "Proy Unidades"]]
-                        .sort_values(["Producto", "PDV"])
-                        .reset_index(drop=True)
-                    )
-                    st.markdown("**Detalle por PDV**")
-                    st.dataframe(aplicar_estilo_tabla(detalle_g), use_container_width=True, hide_index=True)
 
             columnas_pdv_csv = [
-                "DNI", "Nombre", "Departamento", "Distrito", "Producto", "PDV",
+                "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto", "PDV",
                 "Cuota", "Avance", "Cumplimiento %", "Proy Unidades",
             ]
             st.download_button(
@@ -953,7 +1055,7 @@ def main():
         else:
             # --- Vista plana habitual (sin PDV) ---
             columnas_mostrar = [
-                "DNI", "Nombre", "Departamento", "Distrito", "Producto",
+                "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto",
                 "Cuota", "Avance", "Cumplimiento %", "Proy Unidades",
             ]
             tabla = (
