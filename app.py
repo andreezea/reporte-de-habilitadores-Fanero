@@ -84,7 +84,7 @@ DEPARTAMENTOS = [
     "Ucayali",
 ]
 
-# Productos analizados (el orden aquí define el orden de las tablas)
+# Productos analizados (el orden aquí define el orden de las columnas)
 PRODUCTOS = ["Prepago", "Porta Flex", "Postpago", "OSS"]
 
 # Distritos de referencia por departamento (usados para el dataset de ejemplo)
@@ -243,7 +243,7 @@ def calcular_metricas(df: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.
 
 
 # =============================================================================
-# 3. FUNCIONES DE PRESENTACIÓN (FORMATO SEMÁFORO)
+# 3. FUNCIONES DE PRESENTACIÓN (FORMATO SEMÁFORO Y TABLAS DINÁMICAS)
 # =============================================================================
 
 def color_semaforo(valor: float) -> str:
@@ -259,9 +259,10 @@ def color_semaforo(valor: float) -> str:
     return f"background-color: {color}; color: #1a1a1a"
 
 
-def _aplicar_semaforo(styler, columnas: list[str]):
-    """Aplica color_semaforo a las columnas indicadas, compatible con
-    distintas versiones de pandas (Styler.map vs applymap)."""
+def _aplicar_semaforo(styler, columnas: list):
+    """Aplica color_semaforo a las columnas indicadas (nombres simples o
+    tuplas, para tablas con columnas MultiIndex), compatible con distintas
+    versiones de pandas (Styler.map vs applymap)."""
     if hasattr(styler, "map"):
         for col in columnas:
             styler = styler.map(color_semaforo, subset=[col])
@@ -283,42 +284,14 @@ def aplicar_estilo_tabla(tabla: pd.DataFrame):
     return _aplicar_semaforo(styler, ["Cumplimiento %"])
 
 
-def aplicar_estilo_resumen_producto(tabla: pd.DataFrame):
-    """Aplica formato numérico y semáforo (Cumplimiento % y Proy %) al
-    resumen por departamento y producto."""
-    styler = tabla.style.format({
-        "Cuota": "{:,.0f}",
-        "Avance": "{:,.0f}",
-        "Cumplimiento %": "{:.1%}",
-        "Proy Unidades": "{:,.0f}",
-        "Proy %": "{:.1%}",
-    })
-    return _aplicar_semaforo(styler, ["Cumplimiento %", "Proy %"])
-
-
-def aplicar_estilo_ritmo(tabla: pd.DataFrame):
-    """Aplica formato numérico y semáforo (Cumplimiento %) a la tabla de
-    ritmo diario."""
-    styler = tabla.style.format({
-        "Cuota": "{:,.0f}",
-        "Avance": "{:,.0f}",
-        "Cumplimiento %": "{:.1%}",
-        "Diferencia": "{:,.0f}",
-        "Cuota Diaria Necesaria": "{:,.1f}",
-    })
-    return _aplicar_semaforo(styler, ["Cumplimiento %"])
-
-
-def resumen_por_producto(df_filtrado: pd.DataFrame, departamentos_sel: list[str],
-                          productos_sel: list[str], dias_en_mes: int,
-                          dia_corte: int) -> pd.DataFrame:
-    """Agrega Cuota y Avance por Departamento + Producto (nunca se suman
-    productos distintos entre sí) y recalcula Cumplimiento %, Proy Unidades y
-    Proy % a partir de los totales agregados.
-
-    Si hay varios departamentos seleccionados, cada uno aparece como su
-    propia fila (una por cada combinación Departamento/Producto)."""
-    resumen = (
+def resumen_por_producto(df_filtrado: pd.DataFrame, departamentos_sel: list,
+                          productos_sel: list, dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
+    """Devuelve el resumen por Departamento con los productos como columnas
+    agrupadas: debajo de cada producto van Cuota, Avance, Cumplimiento %,
+    Proy Unidades y Proy %. Cuota y Avance se agregan primero (suma dentro
+    del mismo producto) y los porcentajes se recalculan sobre esos totales;
+    nunca se suman productos distintos entre sí."""
+    largo = (
         df_filtrado.groupby(["Departamento", "Producto"], as_index=False)
         .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
     )
@@ -326,40 +299,77 @@ def resumen_por_producto(df_filtrado: pd.DataFrame, departamentos_sel: list[str]
     orden_dep = [d for d in DEPARTAMENTOS if d in departamentos_sel]
     orden_prod = [p for p in PRODUCTOS if p in productos_sel]
     combinaciones = pd.MultiIndex.from_product([orden_dep, orden_prod], names=["Departamento", "Producto"])
+    largo = largo.set_index(["Departamento", "Producto"]).reindex(combinaciones).reset_index()
+    largo[["Cuota", "Avance"]] = largo[["Cuota", "Avance"]].fillna(0)
 
-    resumen = resumen.set_index(["Departamento", "Producto"]).reindex(combinaciones).reset_index()
-    resumen[["Cuota", "Avance"]] = resumen[["Cuota", "Avance"]].fillna(0)
-
-    resumen["Cumplimiento %"] = np.where(resumen["Cuota"] > 0, resumen["Avance"] / resumen["Cuota"], 0.0)
+    largo["Cumplimiento %"] = np.where(largo["Cuota"] > 0, largo["Avance"] / largo["Cuota"], 0.0)
     factor_proyeccion = dias_en_mes / max(dia_corte, 1)
-    resumen["Proy Unidades"] = resumen["Avance"] * factor_proyeccion
-    resumen["Proy %"] = np.where(resumen["Cuota"] > 0, resumen["Proy Unidades"] / resumen["Cuota"], 0.0)
+    largo["Proy Unidades"] = largo["Avance"] * factor_proyeccion
+    largo["Proy %"] = np.where(largo["Cuota"] > 0, largo["Proy Unidades"] / largo["Cuota"], 0.0)
 
-    return resumen[["Departamento", "Producto", "Cuota", "Avance", "Cumplimiento %", "Proy Unidades", "Proy %"]]
+    metricas = ["Cuota", "Avance", "Cumplimiento %", "Proy Unidades", "Proy %"]
+    ancho = largo.pivot_table(index="Departamento", columns="Producto", values=metricas, aggfunc="first")
+    ancho = ancho.swaplevel(axis=1)
+    columnas_orden = pd.MultiIndex.from_product([orden_prod, metricas])
+    ancho = ancho.reindex(index=orden_dep, columns=columnas_orden)
+
+    return ancho
 
 
-def ritmo_diario_por_producto(df_filtrado: pd.DataFrame, productos_sel: list[str],
-                               dias_restantes: int) -> pd.DataFrame:
-    """Calcula, por producto, cuánto se necesita vender por día para cerrar
-    la cuota en lo que resta del mes: (Cuota - Avance) / días restantes."""
-    ritmo = (
-        df_filtrado.groupby("Producto", as_index=False)
-        .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
-    )
+def aplicar_estilo_resumen_producto(tabla: pd.DataFrame, orden_prod: list):
+    """Aplica formato numérico y semáforo (Cumplimiento % y Proy %) al
+    resumen por departamento con productos como columnas agrupadas."""
+    fmt = {}
+    for p in orden_prod:
+        fmt[(p, "Cuota")] = "{:,.0f}"
+        fmt[(p, "Avance")] = "{:,.0f}"
+        fmt[(p, "Cumplimiento %")] = "{:.1%}"
+        fmt[(p, "Proy Unidades")] = "{:,.0f}"
+        fmt[(p, "Proy %")] = "{:.1%}"
 
-    orden = [p for p in PRODUCTOS if p in productos_sel]
-    ritmo = ritmo.set_index("Producto").reindex(orden).reset_index()
-    ritmo[["Cuota", "Avance"]] = ritmo[["Cuota", "Avance"]].fillna(0)
+    styler = tabla.style.format(fmt, na_rep="-")
+    subset = [(p, "Cumplimiento %") for p in orden_prod] + [(p, "Proy %") for p in orden_prod]
+    return _aplicar_semaforo(styler, subset)
 
-    ritmo["Cumplimiento %"] = np.where(ritmo["Cuota"] > 0, ritmo["Avance"] / ritmo["Cuota"], 0.0)
-    ritmo["Diferencia"] = ritmo["Cuota"] - ritmo["Avance"]
+
+def ritmo_diario_por_gestor(df_filtrado: pd.DataFrame, productos_sel: list,
+                             dias_restantes: int) -> pd.DataFrame:
+    """Arma el detalle por gestor (DNI / Nombre en filas) con los productos
+    como columnas agrupadas: debajo de cada producto van Cuota Diaria
+    Necesaria, Corte (avance registrado a la fecha de corte) y Cump %."""
+    base = df_filtrado[["DNI", "Nombre", "Producto", "Cuota", "Avance"]].copy()
+    base["Cump %"] = np.where(base["Cuota"] > 0, base["Avance"] / base["Cuota"], 0.0)
+    base["Corte"] = base["Avance"]
 
     if dias_restantes > 0:
-        ritmo["Cuota Diaria Necesaria"] = ritmo["Diferencia"] / dias_restantes
+        base["Cuota Diaria"] = (base["Cuota"] - base["Avance"]) / dias_restantes
     else:
-        ritmo["Cuota Diaria Necesaria"] = np.nan
+        base["Cuota Diaria"] = np.nan
 
-    return ritmo[["Producto", "Cuota", "Avance", "Cumplimiento %", "Diferencia", "Cuota Diaria Necesaria"]]
+    orden_prod = [p for p in PRODUCTOS if p in productos_sel]
+    metricas = ["Cuota Diaria", "Corte", "Cump %"]
+
+    ancho = base.pivot_table(index=["DNI", "Nombre"], columns="Producto", values=metricas, aggfunc="first")
+    ancho = ancho.swaplevel(axis=1)
+    columnas_orden = pd.MultiIndex.from_product([orden_prod, metricas])
+    ancho = ancho.reindex(columns=columnas_orden)
+    ancho = ancho.reset_index().sort_values(["Nombre", "DNI"]).set_index(["DNI", "Nombre"])
+
+    return ancho
+
+
+def aplicar_estilo_ritmo_gestor(tabla: pd.DataFrame, orden_prod: list):
+    """Aplica formato numérico y semáforo (Cump %) a la tabla de ritmo
+    diario por gestor."""
+    fmt = {}
+    for p in orden_prod:
+        fmt[(p, "Cuota Diaria")] = "{:,.1f}"
+        fmt[(p, "Corte")] = "{:,.0f}"
+        fmt[(p, "Cump %")] = "{:.1%}"
+
+    styler = tabla.style.format(fmt, na_rep="-")
+    subset = [(p, "Cump %") for p in orden_prod]
+    return _aplicar_semaforo(styler, subset)
 
 
 # =============================================================================
@@ -505,6 +515,8 @@ def main():
     if not productos_sel:
         productos_sel = PRODUCTOS
 
+    orden_prod_sel = [p for p in PRODUCTOS if p in productos_sel]
+
     df_filtrado = df[
         (df["Habilitador"] == habilitador_sel)
         & (df["Departamento"].isin(departamentos_sel))
@@ -513,7 +525,7 @@ def main():
 
     st.markdown("---")
 
-    # --- Resumen por producto (y departamento, si hay varios seleccionados) ---
+    # --- Resumen por producto (productos como columnas agrupadas) ---
     st.subheader("Resumen por Producto")
     if df_filtrado.empty:
         st.info("No hay datos para los filtros seleccionados.")
@@ -522,9 +534,8 @@ def main():
             df_filtrado, departamentos_sel, productos_sel, dias_en_mes, dia_corte
         )
         st.dataframe(
-            aplicar_estilo_resumen_producto(tabla_resumen),
+            aplicar_estilo_resumen_producto(tabla_resumen, orden_prod_sel),
             use_container_width=True,
-            hide_index=True,
         )
         st.caption("🟥 <80% · 🟨 80%–99% · 🟩 ≥100% (aplica a Cumplimiento % y Proy %)")
 
@@ -569,25 +580,36 @@ def main():
         st.subheader(f"Ritmo diario necesario · {habilitador_sel}")
         st.caption(
             f"Quedan {dias_restantes} día(s) para el cierre del mes "
-            f"(día {dia_corte} → día {dias_en_mes})."
+            f"(día {dia_corte} → día {dias_en_mes}). Detalle por gestor, "
+            "con los productos como columnas agrupadas."
         )
 
         if df_filtrado.empty:
             st.info("No hay datos para los filtros seleccionados.")
         else:
-            tabla_ritmo = ritmo_diario_por_producto(df_filtrado, productos_sel, dias_restantes)
-
             if dias_restantes == 0:
                 st.warning("El mes ya cerró; no quedan días para calcular el ritmo diario.")
 
+            tabla_ritmo = ritmo_diario_por_gestor(df_filtrado, productos_sel, dias_restantes)
+
             st.dataframe(
-                aplicar_estilo_ritmo(tabla_ritmo),
+                aplicar_estilo_ritmo_gestor(tabla_ritmo, orden_prod_sel),
                 use_container_width=True,
-                hide_index=True,
+                height=500,
             )
+
+            tabla_ritmo_csv = tabla_ritmo.copy()
+            tabla_ritmo_csv.columns = [f"{p} - {m}" for p, m in tabla_ritmo_csv.columns]
+            st.download_button(
+                "⬇️ Descargar ritmo diario (CSV)",
+                data=tabla_ritmo_csv.reset_index().to_csv(index=False).encode("utf-8"),
+                file_name=f"ritmo_diario_{habilitador_sel.replace(' ', '_').lower()}.csv",
+                mime="text/csv",
+            )
+
             st.caption(
-                "Cuota Diaria Necesaria = (Cuota - Avance) / días restantes · "
-                "🟥 <80% · 🟨 80%–99% · 🟩 ≥100% (Cumplimiento %)"
+                "Cuota Diaria = (Cuota - Avance) / días restantes · Corte = avance a la fecha de corte · "
+                "🟥 <80% · 🟨 80%–99% · 🟩 ≥100% (Cump %)"
             )
 
 
