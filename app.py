@@ -23,26 +23,20 @@ Accesos ocultos (nadie los ve sin conocer la URL exacta):
     Ambos se pueden combinar, por ejemplo ?admin=1&editar=1.
 
 Lógica de proyección (Cuota y Avance son unidades, no montos en dinero):
-    El "día de corte" es el día del mes de la última venta cargada. Con eso:
+    Al publicar los datos, el administrador indica el "día de corte": el
+    último día del mes con ventas efectivamente cargadas. Con eso:
         Proy Unidades = Avance * (días del mes / día de corte)
         Proy %        = Proy Unidades / Cuota
         Días restantes = días del mes - día de corte
         Cuota diaria necesaria = (Cuota - Avance) / Días restantes
 
 Carga de datos del administrador (panel_admin, sección "4"):
-    Hay dos formas de publicar información, pensadas para dos momentos
-    distintos:
-    - Carga diaria (suma automática): el uso normal, día a día. El
-      administrador sube un archivo con las ventas de UN solo día (misma
-      estructura de columnas que la plantilla de cuotas, pero "Avance" en
-      ese archivo significa "vendido ese día", no acumulado). El sistema
-      SUMA ese Avance al acumulado ya publicado, por DNI + PDV + Producto
-      -no lo reemplaza-. La Cuota del archivo reemplaza la anterior (por si
-      hay ajuste de meta). Cada carga queda registrada por fecha
-      (historial_cargas.json) para avisar si se repite una fecha por error.
-    - Carga inicial / completa del mes: reemplaza TODO lo publicado (Cuota
-      y Avance de todos). Se usa solo para iniciar un mes nuevo o corregir
-      el archivo completo desde cero; borra el historial de cargas diarias.
+    Un solo flujo, simple: el administrador sube un archivo Excel con Cuota
+    y Avance (Avance = acumulado del mes hasta la fecha de corte que se
+    declara), indica Mes/Año/Día de corte, y publica. Cada publicación
+    REEMPLAZA por completo lo que veía gerencia -no suma nada-, así que el
+    Avance que traiga el archivo debe ser siempre el acumulado real a esa
+    fecha, no solo lo vendido ese día.
 
 Ubicación geográfica:
     Departamento → Provincia → Distrito. Provincia es un campo obligatorio
@@ -64,22 +58,17 @@ Puntos de Venta (PDV):
     Tanto en "Detalle Habilitador" como en "Ritmo Diario", cuando el
     habilitador seleccionado es uno de estos dos, cada activador/
     desarrollador se muestra con el mismo cuadro (tabla) siempre visible
-    (con el total de sus PDV, ya sumado automáticamente con cada carga
-    diaria), y un expander "Ver detalle por PDV" con una fila por cada punto
-    de venta (identificado por DNI + Nombre PDV).
+    (con el total de sus PDV), y un expander "Ver detalle por PDV" con una
+    fila por cada punto de venta (identificado por DNI + Nombre PDV).
 
 Plantillas Excel (panel de administrador, sección "5. Plantillas") - se
-trabaja con 3 plantillas, una por cada flujo de carga:
-    1. Plantilla de cuotas (generar_plantilla_excel): para la carga inicial
-       / completa del mes. Cuota y Avance = acumulado desde cero.
-    2. Plantilla de carga diaria (generar_plantilla_carga_diaria_excel):
-       mismas columnas que la de cuotas, pero Avance = solo lo vendido ESE
-       día (se suma al acumulado, no lo reemplaza). Es la que se usa a
-       diario.
-    3. Plantilla de avances / back office (generar_plantilla_avances_excel):
+trabaja con 2 plantillas:
+    1. Plantilla de cuotas (generar_plantilla_excel): para el administrador,
+       con Cuota y Avance acumulado de cada activador/desarrollador y de
+       cada PDV. Se usa en cada publicación (reemplaza todo).
+    2. Plantilla de avances / back office (generar_plantilla_avances_excel):
        para los coordinadores, con las mismas columnas de identidad pero SIN
-       Cuota (ellos solo reportan Avance, y ese flujo sigue siendo de
-       reemplazo directo, no de suma).
+       Cuota (ellos solo reportan Avance).
 
 Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 """
@@ -87,7 +76,7 @@ Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 import calendar
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from io import BytesIO
 
 import numpy as np
@@ -110,14 +99,12 @@ st.set_page_config(
 )
 
 # Rutas donde se guarda el último archivo publicado por el administrador, sus
-# metadatos (mes/año/día de corte), el historial de cargas diarias
-# incrementales y el registro de la última edición de avances. Persisten
-# mientras la app siga corriendo, y las ve todo el que abra el enlace del
-# dashboard.
+# metadatos (mes/año/día de corte) y el registro de la última edición de
+# avances. Persisten mientras la app siga corriendo, y las ve todo el que
+# abra el enlace del dashboard.
 DATA_DIR = "data"
 DATA_FILE = os.path.join(DATA_DIR, "ultima_carga.xlsx")
 DATA_META = os.path.join(DATA_DIR, "meta.json")
-HISTORIAL_CARGAS = os.path.join(DATA_DIR, "historial_cargas.json")
 LOG_EDICION = os.path.join(DATA_DIR, "ultima_edicion.json")
 
 # Habilitadores disponibles para el filtro principal (selectbox)
@@ -322,8 +309,7 @@ def generar_datos_ejemplo(n_gestores: int = 150, seed: int = 42) -> pd.DataFrame
 
 
 def cargar_datos_excel(archivo) -> pd.DataFrame | None:
-    """Lee y valida un archivo Excel cargado por el administrador (sirve
-    tanto para la carga inicial/completa como para la carga diaria).
+    """Lee y valida un archivo Excel cargado por el administrador.
 
     Retorna None (y muestra un error en la UI) si faltan columnas requeridas
     (incluye Provincia). Las columnas PDV y Nombre PDV son opcionales: si no
@@ -398,14 +384,10 @@ def obtener_datos_publicados() -> tuple[pd.DataFrame, int, int, int]:
     return df_ejemplo, dia_corte, ahora.month, ahora.year
 
 
-def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int,
-                    resetear_historial: bool = False) -> None:
+def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int) -> None:
     """Guarda el archivo validado y sus metadatos como la fuente de datos
     oficial del dashboard, visible para todos los usuarios en su próxima
-    recarga.
-
-    `resetear_historial=True` borra el historial de cargas diarias
-    incrementales (usar solo en la carga inicial/completa de un mes nuevo)."""
+    recarga. Reemplaza por completo lo publicado anteriormente."""
     os.makedirs(DATA_DIR, exist_ok=True)
     df = df.copy()
     df["DNI"] = df["DNI"].astype(str).str.strip()
@@ -415,83 +397,7 @@ def publicar_datos(df: pd.DataFrame, dia_corte: int, mes: int, anio: int,
     df.to_excel(DATA_FILE, index=False)
     with open(DATA_META, "w", encoding="utf-8") as f:
         json.dump({"dia_corte": dia_corte, "mes": mes, "anio": anio}, f)
-    if resetear_historial and os.path.exists(HISTORIAL_CARGAS):
-        os.remove(HISTORIAL_CARGAS)
     _leer_excel_publicado.clear()  # invalida el cache de lectura
-
-
-def obtener_historial_cargas() -> list:
-    """Devuelve la lista de fechas (YYYY-MM-DD) para las que ya se registró
-    una carga diaria incremental. Se usa para avisar si se intenta volver a
-    cargar la misma fecha por error (posible duplicado de ventas)."""
-    if os.path.exists(HISTORIAL_CARGAS):
-        try:
-            with open(HISTORIAL_CARGAS, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:  # noqa: BLE001 - archivo corrupto o incompleto
-            return []
-    return []
-
-
-def registrar_carga_incremental(fecha_str: str) -> None:
-    """Agrega una fecha al historial de cargas diarias incrementales."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-    historial = obtener_historial_cargas()
-    historial.append(fecha_str)
-    with open(HISTORIAL_CARGAS, "w", encoding="utf-8") as f:
-        json.dump(historial, f)
-
-
-def sumar_avance_incremental(df_incremental: pd.DataFrame) -> pd.DataFrame:
-    """Suma el Avance de un archivo incremental (ventas de UN día) sobre el
-    Avance ya acumulado y publicado en el sistema, por DNI + PDV + Producto.
-
-    La Cuota y los campos de identidad (Nombre, Departamento, Provincia,
-    Distrito, Habilitador, Nombre PDV) se REEMPLAZAN con lo que traiga el
-    archivo incremental para las combinaciones que ya existían (por si hay
-    correcciones o cambios de meta a mitad de mes). Las combinaciones
-    DNI + PDV + Producto que no existían todavía se agregan tal cual, ya que
-    no hay ningún Avance previo con el que sumarlas.
-
-    Para Activaciones y Desarrolladores, como cada PDV es una fila propia,
-    sumar el Avance por PDV hace que el total del activador/desarrollador
-    (que ya se calcula sumando sus PDV en toda la app) quede correcto de
-    forma automática, sin ningún paso adicional."""
-    df_actual, _dia_corte, _mes, _anio = obtener_datos_publicados()
-    df_actual = df_actual.copy()
-    df_actual["DNI"] = df_actual["DNI"].astype(str).str.strip()
-    df_actual = _normalizar_pdv(df_actual)
-    df_actual = _normalizar_nombre_pdv(df_actual)
-    df_actual = _normalizar_provincia(df_actual)
-
-    df_incremental = df_incremental.copy()
-    df_incremental["DNI"] = df_incremental["DNI"].astype(str).str.strip()
-    df_incremental = _normalizar_pdv(df_incremental)
-    df_incremental = _normalizar_nombre_pdv(df_incremental)
-    df_incremental = _normalizar_provincia(df_incremental)
-
-    clave = ["DNI", "PDV", "Producto"]
-    base = df_actual.set_index(clave)
-    incr = df_incremental.set_index(clave)
-
-    # Combinaciones nuevas: no había nada previo, se agregan tal cual.
-    claves_nuevas = incr.index.difference(base.index)
-    filas_nuevas = incr.loc[claves_nuevas]
-
-    # Combinaciones existentes: se SUMA el Avance y se REEMPLAZAN Cuota e
-    # identidad con lo que traiga el archivo incremental.
-    claves_existentes = incr.index.intersection(base.index)
-    base.loc[claves_existentes, "Avance"] = (
-        base.loc[claves_existentes, "Avance"] + incr.loc[claves_existentes, "Avance"]
-    )
-    campos_reemplazar = [
-        c for c in ["Nombre", "Departamento", "Provincia", "Distrito", "Habilitador", "Nombre PDV", "Cuota"]
-        if c in incr.columns
-    ]
-    base.loc[claves_existentes, campos_reemplazar] = incr.loc[claves_existentes, campos_reemplazar]
-
-    resultado = pd.concat([base, filas_nuevas]).reset_index()
-    return resultado
 
 
 def calcular_metricas(df: pd.DataFrame, dias_en_mes: int, dia_corte: int) -> pd.DataFrame:
@@ -850,19 +756,21 @@ def panel_admin() -> None:
     # --- Sesión de administrador activa ---
     st.success("Sesión de administrador activa.")
 
-    st.markdown("#### 📋 Plantillas (3, una por cada flujo de carga)")
-    col_plantilla_diaria, col_plantilla_avances = st.columns(2)
+    col_plantilla_cuotas, col_plantilla_avances = st.columns(2)
 
-    with col_plantilla_diaria:
+    with col_plantilla_cuotas:
         st.download_button(
-            "📥 Plantilla de carga diaria",
-            data=generar_plantilla_carga_diaria_excel(),
-            file_name="plantilla_carga_diaria.xlsx",
+            "📥 Plantilla de cuotas",
+            data=generar_plantilla_excel(),
+            file_name="plantilla_carga_cuotas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.caption(
-            "La usas todos los días: Avance = solo lo vendido ESE día (se "
-            "suma al acumulado, no lo reemplaza)."
+            "Para ti (administrador): Cuota y Avance ACUMULADO de cada "
+            "activador/desarrollador y de cada PDV. Cada vez que subas un "
+            "archivo, reemplaza por completo lo publicado -no se suma nada-, "
+            "así que Avance debe ser siempre el total acumulado real hasta "
+            "la fecha de corte que declares."
         )
 
     with col_plantilla_avances:
@@ -874,125 +782,44 @@ def panel_admin() -> None:
         )
         st.caption(
             "Para los coordinadores: solo la columna Avance (sin Cuota), "
-            "para que carguen su progreso desde ?editar=1 (reemplaza, no suma)."
+            "para que carguen su progreso desde ?editar=1."
         )
 
     st.caption(
-        "Cada activador/desarrollador (o gestor, en los demás habilitadores) "
-        "debe tener una fila por producto (Prepago, Porta Flex, Postpago, "
-        "OSS). Para Activaciones y Desarrolladores, agrega una fila por cada "
-        "PDV: en la columna PDV coloca el DNI del líder de ese punto de "
-        "venta, y en 'Nombre PDV' su nombre; para los demás habilitadores "
-        "deja ambas columnas vacías. Provincia es obligatoria para todos."
+        "Elimina las filas de ejemplo antes de subir tu archivo real. Cada "
+        "activador/desarrollador (o gestor, en los demás habilitadores) debe "
+        "tener una fila por producto (Prepago, Porta Flex, Postpago, OSS). "
+        "Para Activaciones y Desarrolladores, agrega una fila por cada PDV: "
+        "en la columna PDV coloca el DNI del líder de ese punto de venta, y "
+        "en 'Nombre PDV' su nombre; para los demás habilitadores deja ambas "
+        "columnas vacías. Provincia es obligatoria para todos."
     )
 
     with st.expander("Columnas del Excel"):
-        st.write("Obligatorias (plantillas de cuotas y de carga diaria):", sorted(COLUMNAS_REQUERIDAS))
-        st.write(
-            "Opcional: PDV y Nombre PDV (solo para Activaciones y "
-            "Desarrolladores) - PDV es el DNI del líder del punto de venta."
-        )
+        st.write("Obligatorias:", sorted(COLUMNAS_REQUERIDAS))
+        st.write("Opcional: PDV (solo para Activaciones y Desarrolladores)")
 
     ahora = datetime.now()
+    col_mes, col_anio = st.columns(2)
+    with col_mes:
+        mes_sel = st.number_input("Mes de la cuota", min_value=1, max_value=12, value=ahora.month)
+    with col_anio:
+        anio_sel = st.number_input("Año", min_value=2020, max_value=2100, value=ahora.year, step=1)
 
-    # --- Carga diaria (suma automática): el flujo de uso normal, día a día ---
-    st.markdown("---")
-    st.markdown("### 🔁 Carga diaria (suma automática)")
-    st.caption(
-        "Úsala todos los días: sube el archivo con las ventas de UN día "
-        "(plantilla de carga diaria, arriba). El sistema SUMA ese Avance al "
-        "acumulado ya publicado -no lo reemplaza-, por DNI + PDV + Producto. "
-        "Para Activaciones y Desarrolladores, sumar por PDV actualiza "
-        "automáticamente el total del activador/desarrollador. La Cuota del "
-        "archivo reemplaza la anterior (úsala si hay ajuste de meta)."
+    dias_en_mes_sel = calendar.monthrange(int(anio_sel), int(mes_sel))[1]
+    dia_corte_defecto = min(max(ahora.day - 1, 1), dias_en_mes_sel)
+    dia_corte_sel = st.number_input(
+        "Día de corte (último día del mes con ventas cargadas)",
+        min_value=1, max_value=dias_en_mes_sel, value=dia_corte_defecto,
     )
 
-    fecha_ayer = (ahora - timedelta(days=1)).date()
-    fecha_venta = st.date_input("Fecha de venta que representa este archivo", value=fecha_ayer)
+    archivo = st.file_uploader("Cargar archivo Excel (.xlsx)", type=["xlsx"])
 
-    historial = obtener_historial_cargas()
-    fecha_str = fecha_venta.isoformat()
-    ya_cargada = fecha_str in historial
-    forzar_duplicado = False
-    if ya_cargada:
-        st.warning(
-            f"Ya se registró una carga incremental para el {fecha_venta:%d/%m/%Y}. "
-            "Si subes el archivo de nuevo, esas ventas se SUMARÁN otra vez "
-            "(quedarían duplicadas)."
-        )
-        forzar_duplicado = st.checkbox("Entiendo el riesgo, sumar de todos modos", key="forzar_duplicado")
-
-    if historial:
-        st.caption(f"Últimas fechas ya cargadas: {', '.join(historial[-8:])}")
-
-    archivo_incremental = st.file_uploader(
-        "Cargar archivo Excel del día (.xlsx)", type=["xlsx"], key="archivo_incremental"
-    )
-
-    if archivo_incremental is not None and st.button("Sumar ventas de esta fecha"):
-        if ya_cargada and not forzar_duplicado:
-            st.error("Carga cancelada: marca la casilla de confirmación si de verdad quieres sumarla de nuevo.")
-        else:
-            df_incremental = cargar_datos_excel(archivo_incremental)
-            if df_incremental is not None and os.path.exists(DATA_FILE):
-                _, _, mes_actual, anio_actual = obtener_datos_publicados()
-                if (fecha_venta.month, fecha_venta.year) != (mes_actual, anio_actual):
-                    st.error(
-                        f"La fecha elegida ({fecha_venta:%m/%Y}) no coincide con el "
-                        f"mes/año actualmente publicado ({mes_actual:02d}/{anio_actual}). "
-                        "Si estás iniciando un mes nuevo, usa primero la 'Carga inicial "
-                        "/ completa del mes' de más abajo."
-                    )
-                    df_incremental = None
-
-            if df_incremental is not None:
-                resultado = sumar_avance_incremental(df_incremental)
-                publicar_datos(resultado, fecha_venta.day, fecha_venta.month, fecha_venta.year)
-                registrar_carga_incremental(fecha_str)
-                st.success(f"Ventas del {fecha_venta:%d/%m/%Y} sumadas correctamente.")
-                st.rerun()
-
-    # --- Carga inicial / completa del mes: reemplaza todo, uso ocasional ---
-    st.markdown("---")
-    with st.expander("⚠️ Carga inicial / completa del mes (reemplaza todo)"):
-        st.download_button(
-            "📥 Plantilla de cuotas (carga inicial)",
-            data=generar_plantilla_excel(),
-            file_name="plantilla_carga_cuotas.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="descargar_plantilla_cuotas",
-        )
-        st.caption(
-            "Usa esto SOLO para iniciar un mes nuevo o para corregir el "
-            "archivo completo desde cero. Cuota y Avance = acumulado desde "
-            "cero. Reemplaza por completo lo publicado y borra el historial "
-            "de cargas diarias."
-        )
-        col_mes, col_anio = st.columns(2)
-        with col_mes:
-            mes_sel = st.number_input("Mes de la cuota", min_value=1, max_value=12, value=ahora.month)
-        with col_anio:
-            anio_sel = st.number_input("Año", min_value=2020, max_value=2100, value=ahora.year, step=1)
-
-        dias_en_mes_sel = calendar.monthrange(int(anio_sel), int(mes_sel))[1]
-        dia_corte_defecto = min(max(ahora.day - 1, 1), dias_en_mes_sel)
-        dia_corte_sel = st.number_input(
-            "Día de corte (último día del mes con ventas cargadas)",
-            min_value=1, max_value=dias_en_mes_sel, value=dia_corte_defecto,
-        )
-
-        archivo_completo = st.file_uploader(
-            "Cargar archivo Excel completo (.xlsx)", type=["xlsx"], key="archivo_completo"
-        )
-
-        if archivo_completo is not None and st.button("Reemplazar todo (carga inicial)"):
-            df_validado = cargar_datos_excel(archivo_completo)
-            if df_validado is not None:
-                publicar_datos(
-                    df_validado, int(dia_corte_sel), int(mes_sel), int(anio_sel),
-                    resetear_historial=True,
-                )
-                st.success("Datos publicados desde cero. Todos los usuarios verán la actualización al recargar.")
+    if archivo is not None and st.button("Publicar datos"):
+        df_validado = cargar_datos_excel(archivo)
+        if df_validado is not None:
+            publicar_datos(df_validado, int(dia_corte_sel), int(mes_sel), int(anio_sel))
+            st.success("Datos publicados. Todos los usuarios verán la actualización al recargar.")
 
     if os.path.exists(DATA_FILE):
         ultima_actualizacion = datetime.fromtimestamp(os.path.getmtime(DATA_FILE))
@@ -1007,20 +834,32 @@ def panel_admin() -> None:
 # 5. PLANTILLAS EXCEL DESCARGABLES
 # =============================================================================
 
-def _armar_plantilla_cuotas_o_diaria(nombre_hoja: str, ejemplos: list) -> bytes:
-    """Función auxiliar compartida por generar_plantilla_excel() y
-    generar_plantilla_carga_diaria_excel(): ambas tienen exactamente las
-    mismas columnas y validaciones, solo cambian el título de la hoja y los
-    valores de ejemplo (acumulado vs. vendido ese día)."""
+def generar_plantilla_excel() -> bytes:
+    """Genera en memoria la plantilla completa (para el admin) con los
+    encabezados requeridos (incluida Provincia), filas de ejemplo (una con
+    PDV) y listas desplegables (validación de datos) para Departamento,
+    Habilitador, Producto y Provincia. La columna PDV lleva el DNI del líder
+    del punto de venta, y "Nombre PDV" su nombre. Cuota y Avance = acumulado
+    del mes (cada carga reemplaza todo, no se suma)."""
     wb = Workbook()
     ws = wb.active
-    ws.title = nombre_hoja
+    ws.title = "Datos"
 
     headers = [
         "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Habilitador",
         "Producto", "PDV", "Nombre PDV", "Cuota", "Avance",
     ]
     ws.append(headers)
+
+    ejemplos = [
+        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 150],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 40],
+        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
+        # (PDV = DNI del líder de ese punto de venta, Nombre PDV = su nombre)
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 150],
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 95],
+    ]
     for fila in ejemplos:
         ws.append(fila)
 
@@ -1049,49 +888,13 @@ def _armar_plantilla_cuotas_o_diaria(nombre_hoja: str, ejemplos: list) -> bytes:
     return buffer.getvalue()
 
 
-def generar_plantilla_excel() -> bytes:
-    """Plantilla 1 de 3: carga inicial / completa del mes. Cuota y Avance =
-    acumulado desde cero. Incluye filas de ejemplo (una con PDV) y listas
-    desplegables para Departamento, Habilitador, Producto y Provincia. La
-    columna PDV lleva el DNI del líder del punto de venta, y "Nombre PDV" su
-    nombre."""
-    ejemplos = [
-        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 150],
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 40],
-        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
-        # (PDV = DNI del líder de ese punto de venta, Nombre PDV = su nombre)
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 150],
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 95],
-    ]
-    return _armar_plantilla_cuotas_o_diaria("Datos", ejemplos)
-
-
-def generar_plantilla_carga_diaria_excel() -> bytes:
-    """Plantilla 2 de 3: carga diaria (suma automática). Mismas columnas que
-    la plantilla de cuotas, pero Avance representa solo lo vendido ESE día
-    (el sistema lo suma al acumulado ya publicado, no lo reemplaza). La
-    Cuota, si viene, reemplaza la anterior (por si hay ajuste de meta)."""
-    ejemplos = [
-        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías.
-        # Avance = solo lo vendido este día (números pequeños, no acumulado)
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 8],
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 3],
-        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 5],
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 4],
-    ]
-    return _armar_plantilla_cuotas_o_diaria("CargaDiaria", ejemplos)
-
-
 def generar_plantilla_avances_excel() -> bytes:
-    """Plantilla 3 de 3: para los coordinadores (back office). Mismas
-    columnas de identidad que las plantillas de cuotas/carga diaria, pero
-    SIN la columna Cuota (ellos solo reportan Avance). Es una plantilla
-    genérica de referencia -no depende de datos ya publicados-, pensada para
-    repartir antes de la primera carga o como respaldo de la descarga en
-    vivo que ya existe dentro de "Editar Avances". Este flujo de
-    coordinadores REEMPLAZA el Avance con lo que suban, no lo suma."""
+    """Genera en memoria la plantilla que se le entrega a los coordinadores
+    (back office) para cargar avances: las mismas columnas de identidad que
+    la plantilla de cuotas, pero SIN la columna Cuota (ellos solo reportan
+    Avance). Es una plantilla genérica de referencia -no depende de datos ya
+    publicados-, pensada para repartir antes de la primera carga o como
+    respaldo de la descarga en vivo que ya existe dentro de "Editar Avances"."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Avances"
@@ -1158,9 +961,7 @@ def dataframe_a_excel_bytes(df: pd.DataFrame, hoja: str = "Avances") -> bytes:
 # uso interno, no una autenticación real. Pueden editar en línea (tabla
 # editable) o descargando su plantilla, editándola en Excel y subiéndola de
 # vuelta; en ambos casos solo se aplican cambios a sus DNI/PDV/Producto
-# permitidos, sin importar qué traiga el archivo subido. A diferencia de la
-# carga diaria del administrador, este flujo siempre REEMPLAZA el Avance con
-# el valor que el coordinador indique (no lo suma).
+# permitidos, sin importar qué traiga el archivo subido.
 
 def registrar_ultima_edicion(nombre: str) -> None:
     """Guarda quién fue la última persona en actualizar avances y cuándo."""
