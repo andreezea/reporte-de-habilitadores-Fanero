@@ -47,17 +47,11 @@ Puntos de Venta (PDV):
     Ambas columnas son opcionales: si no existen (archivos anteriores a esta
     función), se completan vacías y todo sigue funcionando igual.
 
-    En la pestaña "Detalle Habilitador", cuando el habilitador seleccionado
-    es uno de estos dos, cada activador/desarrollador se muestra con el
-    mismo cuadro (tabla) siempre visible, y un expander aparte para el
-    desglose por PDV:
-    - Siempre visible: nombre, DNI y una tabla con la fila "Total" (suma de
-      sus PDV), con identidad DNI/PDV/Nombre PDV/Departamento/Provincia/
-      Distrito y los productos como columnas agrupadas (Cuota, Avance,
-      Cumplimiento % debajo de cada producto) - el mismo formato de cuadro
-      tanto colapsado como expandido.
-    - Al desplegar "Ver detalle por PDV": la misma tabla pero con una fila
-      por cada PDV (DNI + nombre de su líder) en vez de la fila Total.
+    Tanto en "Detalle Habilitador" como en "Ritmo Diario", cuando el
+    habilitador seleccionado es uno de estos dos, cada activador/
+    desarrollador se muestra con el mismo cuadro (tabla) siempre visible
+    (con el total de sus PDV), y un expander "Ver detalle por PDV" con una
+    fila por cada punto de venta (identificado por DNI + Nombre PDV).
 
 Plantillas Excel (panel de administrador, sección "5. Plantillas"):
     - Plantilla de cuotas (generar_plantilla_excel): para el administrador,
@@ -607,7 +601,9 @@ def ritmo_diario_por_gestor(df_filtrado: pd.DataFrame, productos_sel: list,
 
     Cuota y Avance se agregan primero por gestor + producto (sumando todos
     sus PDV si aplica) antes de calcular los indicadores, para no perder
-    información cuando un gestor tiene varios PDV para el mismo producto."""
+    información cuando un gestor tiene varios PDV para el mismo producto.
+    Se usa para los habilitadores SIN desglose de PDV; para Activaciones y
+    Desarrolladores se usa ritmo_pdv_por_gestor en su lugar."""
     agregado = (
         df_filtrado.groupby(["DNI", "Nombre", "Producto"], as_index=False)
         .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
@@ -633,8 +629,9 @@ def ritmo_diario_por_gestor(df_filtrado: pd.DataFrame, productos_sel: list,
 
 
 def aplicar_estilo_ritmo_gestor(tabla: pd.DataFrame, orden_prod: list):
-    """Aplica formato numérico y semáforo (Cump %) a la tabla de ritmo
-    diario por gestor."""
+    """Aplica formato numérico y semáforo (Cump %) a una tabla de ritmo
+    diario, sea la vista plana por gestor o la vista Total + PDV por
+    activador/desarrollador (el formato solo depende de las columnas)."""
     fmt = {}
     for p in orden_prod:
         fmt[(p, "Cuota Diaria")] = "{:,.1f}"
@@ -644,6 +641,65 @@ def aplicar_estilo_ritmo_gestor(tabla: pd.DataFrame, orden_prod: list):
     styler = tabla.style.format(fmt, na_rep="-")
     subset = [(p, "Cump %") for p in orden_prod]
     return _aplicar_semaforo(styler, subset)
+
+
+def ritmo_pdv_por_gestor(detalle_g: pd.DataFrame, productos_sel: list, dias_restantes: int) -> pd.DataFrame:
+    """Igual que tabla_detalle_gestor pero con las métricas de ritmo diario:
+    a partir del detalle de PDV de UN activador/desarrollador (ya filtrado a
+    su DNI), arma una fila "Total" (suma de sus PDV) y una fila por cada PDV,
+    con Cuota Diaria, Corte y Cump % debajo de cada producto (columnas
+    agrupadas), en vez de Cuota/Avance/Cumplimiento %. Misma identidad DNI,
+    PDV, Nombre PDV, Departamento, Provincia, Distrito."""
+    identidad = ["DNI", "Departamento", "Provincia", "Distrito"]
+
+    total = (
+        detalle_g.groupby(identidad + ["Producto"], as_index=False)
+        .agg(Cuota=("Cuota", "sum"), Avance=("Avance", "sum"))
+    )
+    total["PDV"] = "Total"
+    total["Nombre PDV"] = ""
+
+    columnas_base = identidad + ["Producto", "PDV", "Nombre PDV", "Cuota", "Avance"]
+    filas_pdv = detalle_g[columnas_base].copy()
+    combinado = pd.concat([total[columnas_base], filas_pdv], ignore_index=True)
+
+    combinado["Cump %"] = np.where(combinado["Cuota"] > 0, combinado["Avance"] / combinado["Cuota"], 0.0)
+    combinado["Corte"] = combinado["Avance"]
+    if dias_restantes > 0:
+        combinado["Cuota Diaria"] = (combinado["Cuota"] - combinado["Avance"]) / dias_restantes
+    else:
+        combinado["Cuota Diaria"] = np.nan
+
+    orden_prod = [p for p in PRODUCTOS if p in productos_sel]
+    metricas = ["Cuota Diaria", "Corte", "Cump %"]
+
+    ancho = combinado.pivot_table(
+        index=["DNI", "PDV", "Nombre PDV", "Departamento", "Provincia", "Distrito"],
+        columns="Producto", values=metricas, aggfunc="first",
+    )
+    ancho = ancho.swaplevel(axis=1)
+    columnas_orden = pd.MultiIndex.from_product([orden_prod, metricas])
+    ancho = ancho.reindex(columns=columnas_orden)
+
+    fila_total = ancho[ancho.index.get_level_values("PDV") == "Total"]
+    filas_pdv_orden = ancho[ancho.index.get_level_values("PDV") != "Total"].sort_index(level="PDV")
+    return pd.concat([fila_total, filas_pdv_orden])
+
+
+def ritmo_diario_detalle_pdv(df_filtrado: pd.DataFrame, dias_restantes: int) -> pd.DataFrame:
+    """Detalle a nivel PDV (una fila por Producto + PDV) con Cuota Diaria,
+    Corte y Cump %, sin agregar. Se usa para la descarga CSV del ritmo
+    diario de Activaciones/Desarrolladores."""
+    detalle = df_filtrado[
+        ["DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto", "PDV", "Nombre PDV", "Cuota", "Avance"]
+    ].copy()
+    detalle["Corte"] = detalle["Avance"]
+    detalle["Cump %"] = np.where(detalle["Cuota"] > 0, detalle["Avance"] / detalle["Cuota"], 0.0)
+    if dias_restantes > 0:
+        detalle["Cuota Diaria"] = (detalle["Cuota"] - detalle["Avance"]) / dias_restantes
+    else:
+        detalle["Cuota Diaria"] = np.nan
+    return detalle
 
 
 # =============================================================================
@@ -1190,7 +1246,7 @@ def main():
                     aplicar_estilo_detalle_pdv(tabla_total, orden_prod_sel),
                     use_container_width=True,
                 )
-                with st.expander(f"Ver detalle por PDV ({len(tabla_pdv)} punto(s) de venta)"):
+                with st.expander(f"➕ Ver detalle por PDV ({len(tabla_pdv)} punto(s) de venta)"):
                     st.dataframe(
                         aplicar_estilo_detalle_pdv(tabla_pdv, orden_prod_sel),
                         use_container_width=True,
@@ -1240,8 +1296,7 @@ def main():
         st.subheader(f"Ritmo diario necesario · {habilitador_sel}")
         st.caption(
             f"Quedan {dias_restantes} día(s) para el cierre del mes "
-            f"(día {dia_corte} → día {dias_en_mes}). Detalle por gestor, "
-            "con los productos como columnas agrupadas (suma de PDV si aplica)."
+            f"(día {dia_corte} → día {dias_en_mes})."
         )
 
         if df_filtrado.empty:
@@ -1250,22 +1305,77 @@ def main():
             if dias_restantes == 0:
                 st.warning("El mes ya cerró; no quedan días para calcular el ritmo diario.")
 
-            tabla_ritmo = ritmo_diario_por_gestor(df_filtrado, productos_sel, dias_restantes)
+            if habilitador_sel in HABILITADORES_CON_PDV:
+                # --- Vista con Puntos de Venta: mismo patrón que Detalle Habilitador ---
+                etiqueta_rol_plural = "activadores" if habilitador_sel == "Activaciones" else "desarrolladores"
+                etiqueta_rol_singular = etiqueta_rol_plural[:-1]
+                st.caption(
+                    f"Cuadro por {etiqueta_rol_singular}, con el total de sus PDV por "
+                    "producto (columnas agrupadas); despliega 'Ver detalle por PDV' "
+                    "para el ritmo diario de cada punto de venta."
+                )
 
-            st.dataframe(
-                aplicar_estilo_ritmo_gestor(tabla_ritmo, orden_prod_sel),
-                use_container_width=True,
-                height=500,
-            )
+                gestores = (
+                    df_filtrado[["DNI", "Nombre", "Departamento"]]
+                    .drop_duplicates()
+                    .sort_values(["Departamento", "Nombre"])
+                    .reset_index(drop=True)
+                )
+                st.caption(f"{len(gestores)} {etiqueta_rol_plural} en {habilitador_sel}.")
 
-            tabla_ritmo_csv = tabla_ritmo.copy()
-            tabla_ritmo_csv.columns = [f"{p} - {m}" for p, m in tabla_ritmo_csv.columns]
-            st.download_button(
-                "⬇️ Descargar ritmo diario (CSV)",
-                data=tabla_ritmo_csv.reset_index().to_csv(index=False).encode("utf-8"),
-                file_name=f"ritmo_diario_{habilitador_sel.replace(' ', '_').lower()}.csv",
-                mime="text/csv",
-            )
+                for _, gestor in gestores.iterrows():
+                    detalle_g = df_filtrado[df_filtrado["DNI"] == gestor["DNI"]]
+                    tabla_g = ritmo_pdv_por_gestor(detalle_g, productos_sel, dias_restantes)
+
+                    es_total = tabla_g.index.get_level_values("PDV") == "Total"
+                    tabla_total = tabla_g[es_total]
+                    tabla_pdv = tabla_g[~es_total]
+
+                    st.markdown(f"**👤 {gestor['Nombre']} · DNI {gestor['DNI']}**")
+                    st.dataframe(
+                        aplicar_estilo_ritmo_gestor(tabla_total, orden_prod_sel),
+                        use_container_width=True,
+                    )
+                    with st.expander(f"➕ Ver detalle por PDV ({len(tabla_pdv)} punto(s) de venta)"):
+                        st.dataframe(
+                            aplicar_estilo_ritmo_gestor(tabla_pdv, orden_prod_sel),
+                            use_container_width=True,
+                        )
+                    st.write("")
+
+                detalle_ritmo_pdv = ritmo_diario_detalle_pdv(df_filtrado, dias_restantes)
+                columnas_ritmo_csv = [
+                    "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Producto", "PDV", "Nombre PDV",
+                    "Cuota Diaria", "Corte", "Cump %",
+                ]
+                st.download_button(
+                    "⬇️ Descargar ritmo diario por PDV (CSV)",
+                    data=detalle_ritmo_pdv[columnas_ritmo_csv].sort_values(["Departamento", "Nombre", "Producto", "PDV"])
+                    .to_csv(index=False).encode("utf-8"),
+                    file_name=f"ritmo_diario_pdv_{habilitador_sel.replace(' ', '_').lower()}.csv",
+                    mime="text/csv",
+                )
+            else:
+                # --- Vista plana habitual (sin PDV) ---
+                st.caption(
+                    "Detalle por gestor, con los productos como columnas agrupadas."
+                )
+                tabla_ritmo = ritmo_diario_por_gestor(df_filtrado, productos_sel, dias_restantes)
+
+                st.dataframe(
+                    aplicar_estilo_ritmo_gestor(tabla_ritmo, orden_prod_sel),
+                    use_container_width=True,
+                    height=500,
+                )
+
+                tabla_ritmo_csv = tabla_ritmo.copy()
+                tabla_ritmo_csv.columns = [f"{p} - {m}" for p, m in tabla_ritmo_csv.columns]
+                st.download_button(
+                    "⬇️ Descargar ritmo diario (CSV)",
+                    data=tabla_ritmo_csv.reset_index().to_csv(index=False).encode("utf-8"),
+                    file_name=f"ritmo_diario_{habilitador_sel.replace(' ', '_').lower()}.csv",
+                    mime="text/csv",
+                )
 
             st.caption(
                 "Cuota Diaria = (Cuota - Avance) / días restantes · Corte = avance a la fecha de corte · "
