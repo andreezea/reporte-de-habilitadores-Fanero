@@ -33,12 +33,12 @@ Carga de datos del administrador (panel_admin, sección "4"):
     Hay dos formas de publicar información, pensadas para dos momentos
     distintos:
     - Carga diaria (suma automática): el uso normal, día a día. El
-      administrador sube un archivo con las ventas de UN solo día (mismo
-      formato que la plantilla de cuotas, pero "Avance" en ese archivo
-      significa "vendido ese día", no acumulado). El sistema SUMA ese
-      Avance al acumulado ya publicado, por DNI + PDV + Producto -no lo
-      reemplaza-. La Cuota del archivo reemplaza la anterior (por si hay
-      ajuste de meta). Cada carga queda registrada por fecha
+      administrador sube un archivo con las ventas de UN solo día (misma
+      estructura de columnas que la plantilla de cuotas, pero "Avance" en
+      ese archivo significa "vendido ese día", no acumulado). El sistema
+      SUMA ese Avance al acumulado ya publicado, por DNI + PDV + Producto
+      -no lo reemplaza-. La Cuota del archivo reemplaza la anterior (por si
+      hay ajuste de meta). Cada carga queda registrada por fecha
       (historial_cargas.json) para avisar si se repite una fecha por error.
     - Carga inicial / completa del mes: reemplaza TODO lo publicado (Cuota
       y Avance de todos). Se usa solo para iniciar un mes nuevo o corregir
@@ -68,14 +68,18 @@ Puntos de Venta (PDV):
     diaria), y un expander "Ver detalle por PDV" con una fila por cada punto
     de venta (identificado por DNI + Nombre PDV).
 
-Plantillas Excel (panel de administrador, sección "5. Plantillas"):
-    - Plantilla de cuotas (generar_plantilla_excel): sirve tanto para la
-      carga inicial (Cuota + Avance acumulado) como para la carga diaria
-      (Cuota + Avance vendido ese día).
-    - Plantilla de avances / back office (generar_plantilla_avances_excel):
-      para los coordinadores, con las mismas columnas de identidad pero SIN
-      Cuota (ellos solo reportan Avance, y ese flujo sigue siendo de
-      reemplazo directo, no de suma).
+Plantillas Excel (panel de administrador, sección "5. Plantillas") - se
+trabaja con 3 plantillas, una por cada flujo de carga:
+    1. Plantilla de cuotas (generar_plantilla_excel): para la carga inicial
+       / completa del mes. Cuota y Avance = acumulado desde cero.
+    2. Plantilla de carga diaria (generar_plantilla_carga_diaria_excel):
+       mismas columnas que la de cuotas, pero Avance = solo lo vendido ESE
+       día (se suma al acumulado, no lo reemplaza). Es la que se usa a
+       diario.
+    3. Plantilla de avances / back office (generar_plantilla_avances_excel):
+       para los coordinadores, con las mismas columnas de identidad pero SIN
+       Cuota (ellos solo reportan Avance, y ese flujo sigue siendo de
+       reemplazo directo, no de suma).
 
 Listo para desplegar en Streamlit Cloud: `streamlit run app.py`
 """
@@ -846,19 +850,19 @@ def panel_admin() -> None:
     # --- Sesión de administrador activa ---
     st.success("Sesión de administrador activa.")
 
-    col_plantilla_cuotas, col_plantilla_avances = st.columns(2)
+    st.markdown("#### 📋 Plantillas (3, una por cada flujo de carga)")
+    col_plantilla_diaria, col_plantilla_avances = st.columns(2)
 
-    with col_plantilla_cuotas:
+    with col_plantilla_diaria:
         st.download_button(
-            "📥 Plantilla de cuotas",
-            data=generar_plantilla_excel(),
-            file_name="plantilla_carga_cuotas.xlsx",
+            "📥 Plantilla de carga diaria",
+            data=generar_plantilla_carga_diaria_excel(),
+            file_name="plantilla_carga_diaria.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.caption(
-            "Sirve tanto para la carga diaria (Avance = vendido ese día) "
-            "como para la carga inicial (Avance = acumulado). Elimina las "
-            "filas de ejemplo antes de subir tu archivo real."
+            "La usas todos los días: Avance = solo lo vendido ESE día (se "
+            "suma al acumulado, no lo reemplaza)."
         )
 
     with col_plantilla_avances:
@@ -870,7 +874,7 @@ def panel_admin() -> None:
         )
         st.caption(
             "Para los coordinadores: solo la columna Avance (sin Cuota), "
-            "para que carguen su progreso desde ?editar=1."
+            "para que carguen su progreso desde ?editar=1 (reemplaza, no suma)."
         )
 
     st.caption(
@@ -883,7 +887,7 @@ def panel_admin() -> None:
     )
 
     with st.expander("Columnas del Excel"):
-        st.write("Obligatorias (plantilla de cuotas):", sorted(COLUMNAS_REQUERIDAS))
+        st.write("Obligatorias (plantillas de cuotas y de carga diaria):", sorted(COLUMNAS_REQUERIDAS))
         st.write(
             "Opcional: PDV y Nombre PDV (solo para Activaciones y "
             "Desarrolladores) - PDV es el DNI del líder del punto de venta."
@@ -896,10 +900,9 @@ def panel_admin() -> None:
     st.markdown("### 🔁 Carga diaria (suma automática)")
     st.caption(
         "Úsala todos los días: sube el archivo con las ventas de UN día "
-        "(mismo formato que la plantilla de cuotas, pero aquí Avance = lo "
-        "vendido ese día). El sistema SUMA ese Avance al acumulado ya "
-        "publicado -no lo reemplaza-, por DNI + PDV + Producto. Para "
-        "Activaciones y Desarrolladores, sumar por PDV actualiza "
+        "(plantilla de carga diaria, arriba). El sistema SUMA ese Avance al "
+        "acumulado ya publicado -no lo reemplaza-, por DNI + PDV + Producto. "
+        "Para Activaciones y Desarrolladores, sumar por PDV actualiza "
         "automáticamente el total del activador/desarrollador. La Cuota del "
         "archivo reemplaza la anterior (úsala si hay ajuste de meta)."
     )
@@ -952,11 +955,18 @@ def panel_admin() -> None:
     # --- Carga inicial / completa del mes: reemplaza todo, uso ocasional ---
     st.markdown("---")
     with st.expander("⚠️ Carga inicial / completa del mes (reemplaza todo)"):
+        st.download_button(
+            "📥 Plantilla de cuotas (carga inicial)",
+            data=generar_plantilla_excel(),
+            file_name="plantilla_carga_cuotas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="descargar_plantilla_cuotas",
+        )
         st.caption(
             "Usa esto SOLO para iniciar un mes nuevo o para corregir el "
-            "archivo completo desde cero. Reemplaza por completo lo "
-            "publicado (Cuota y Avance de todos) y borra el historial de "
-            "cargas diarias."
+            "archivo completo desde cero. Cuota y Avance = acumulado desde "
+            "cero. Reemplaza por completo lo publicado y borra el historial "
+            "de cargas diarias."
         )
         col_mes, col_anio = st.columns(2)
         with col_mes:
@@ -997,33 +1007,20 @@ def panel_admin() -> None:
 # 5. PLANTILLAS EXCEL DESCARGABLES
 # =============================================================================
 
-def generar_plantilla_excel() -> bytes:
-    """Genera en memoria la plantilla completa (para el admin) con los
-    encabezados requeridos (incluida Provincia), filas de ejemplo (una con
-    PDV) y listas desplegables (validación de datos) para Departamento,
-    Habilitador, Producto y Provincia. La columna PDV lleva el DNI del líder
-    del punto de venta, y "Nombre PDV" su nombre. Sirve tanto para la carga
-    diaria (Avance = vendido ese día) como para la carga inicial (Avance =
-    acumulado)."""
+def _armar_plantilla_cuotas_o_diaria(nombre_hoja: str, ejemplos: list) -> bytes:
+    """Función auxiliar compartida por generar_plantilla_excel() y
+    generar_plantilla_carga_diaria_excel(): ambas tienen exactamente las
+    mismas columnas y validaciones, solo cambian el título de la hoja y los
+    valores de ejemplo (acumulado vs. vendido ese día)."""
     wb = Workbook()
     ws = wb.active
-    ws.title = "Datos"
+    ws.title = nombre_hoja
 
     headers = [
         "DNI", "Nombre", "Departamento", "Provincia", "Distrito", "Habilitador",
         "Producto", "PDV", "Nombre PDV", "Cuota", "Avance",
     ]
     ws.append(headers)
-
-    ejemplos = [
-        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 150],
-        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 40],
-        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
-        # (PDV = DNI del líder de ese punto de venta, Nombre PDV = su nombre)
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 150],
-        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 95],
-    ]
     for fila in ejemplos:
         ws.append(fila)
 
@@ -1052,13 +1049,49 @@ def generar_plantilla_excel() -> bytes:
     return buffer.getvalue()
 
 
+def generar_plantilla_excel() -> bytes:
+    """Plantilla 1 de 3: carga inicial / completa del mes. Cuota y Avance =
+    acumulado desde cero. Incluye filas de ejemplo (una con PDV) y listas
+    desplegables para Departamento, Habilitador, Producto y Provincia. La
+    columna PDV lleva el DNI del líder del punto de venta, y "Nombre PDV" su
+    nombre."""
+    ejemplos = [
+        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 150],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 40],
+        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
+        # (PDV = DNI del líder de ese punto de venta, Nombre PDV = su nombre)
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 150],
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 95],
+    ]
+    return _armar_plantilla_cuotas_o_diaria("Datos", ejemplos)
+
+
+def generar_plantilla_carga_diaria_excel() -> bytes:
+    """Plantilla 2 de 3: carga diaria (suma automática). Mismas columnas que
+    la plantilla de cuotas, pero Avance representa solo lo vendido ESE día
+    (el sistema lo suma al acumulado ya publicado, no lo reemplaza). La
+    Cuota, si viene, reemplaza la anterior (por si hay ajuste de meta)."""
+    ejemplos = [
+        # Habilitador sin PDV: las columnas PDV y Nombre PDV quedan vacías.
+        # Avance = solo lo vendido este día (números pequeños, no acumulado)
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Prepago", "", "", 300, 8],
+        ["12345678", "Juan Pérez", "Amazonas", "Chachapoyas", "Chachapoyas", "PDV Plus", "Postpago", "", "", 100, 3],
+        # Habilitador con PDV: mismo activador y producto, repartido en 2 PDV
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "71234567", "Ana Ruiz", 180, 5],
+        ["87654321", "Rosa Huamán", "San Martín", "San Martín", "Tarapoto", "Activaciones", "Prepago", "76543210", "Luis Gómez", 120, 4],
+    ]
+    return _armar_plantilla_cuotas_o_diaria("CargaDiaria", ejemplos)
+
+
 def generar_plantilla_avances_excel() -> bytes:
-    """Genera en memoria la plantilla que se le entrega a los coordinadores
-    (back office) para cargar avances: las mismas columnas de identidad que
-    la plantilla de cuotas, pero SIN la columna Cuota (ellos solo reportan
-    Avance). Es una plantilla genérica de referencia -no depende de datos ya
-    publicados-, pensada para repartir antes de la primera carga o como
-    respaldo de la descarga en vivo que ya existe dentro de "Editar Avances"."""
+    """Plantilla 3 de 3: para los coordinadores (back office). Mismas
+    columnas de identidad que las plantillas de cuotas/carga diaria, pero
+    SIN la columna Cuota (ellos solo reportan Avance). Es una plantilla
+    genérica de referencia -no depende de datos ya publicados-, pensada para
+    repartir antes de la primera carga o como respaldo de la descarga en
+    vivo que ya existe dentro de "Editar Avances". Este flujo de
+    coordinadores REEMPLAZA el Avance con lo que suban, no lo suma."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Avances"
